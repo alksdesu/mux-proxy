@@ -203,6 +203,27 @@ impl KeyPool {
     pub fn notifier(&self) -> &UpstreamChangeNotifier {
         &self.notifier
     }
+
+    /// 集成测试用：跳过 DB 加载，把 keys 直接塞进 inner state，
+    /// loaded_at 标记为 now 让 ensure_fresh 视作"刚拉过 DB"。
+    #[doc(hidden)]
+    pub fn test_only_with_keys(
+        keys: Vec<PooledKey>,
+        db: Db,
+        notifier: UpstreamChangeNotifier,
+    ) -> Arc<Self> {
+        let notify_handle = notifier.handle();
+        Arc::new(Self {
+            inner: Mutex::new(PoolInner {
+                keys,
+                loaded_at: Instant::now(),
+                breakers: HashMap::new(),
+            }),
+            db,
+            notifier,
+            notify_handle,
+        })
+    }
 }
 
 /// 上游返回的状态映射到 KeyPool 的反馈动作。``call_site`` 用于日志区分。
