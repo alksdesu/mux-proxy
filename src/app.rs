@@ -3,8 +3,10 @@
 
 use crate::auth::{KeyCache, KeyCacheEntry, SingleFlight};
 use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
+use crate::breaker::Registry as BreakerRegistry;
 use crate::concurrency::Limiter;
 use crate::config::Config;
+use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -41,6 +43,8 @@ pub struct AppState {
     pub limiter: Arc<Limiter>,
     pub snapshot: Arc<SnapshotVersion>,
     pub usage_writer: UsageWriter,
+    pub breaker: Arc<BreakerRegistry>,
+    pub upstream_notifier: UpstreamChangeNotifier,
 }
 
 impl AppState {
@@ -62,6 +66,8 @@ impl AppState {
             limiter,
             snapshot,
             usage_writer,
+            breaker: BreakerRegistry::new(),
+            upstream_notifier: UpstreamChangeNotifier::new(),
         })
     }
 }
