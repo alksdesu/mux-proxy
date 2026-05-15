@@ -29,7 +29,7 @@ pub const MAX_REQUEST_BODY: usize = 32 * 1024 * 1024;
 pub fn build_v1_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/v1", any(dispatch))
-        .route("/v1/{*path}", any(dispatch))
+        .route("/v1/*path", any(dispatch))
         .layer(from_fn_with_state(state.clone(), quota_layer))
         .layer(from_fn_with_state(state, client_auth_layer))
 }
