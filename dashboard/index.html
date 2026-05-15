@@ -1519,7 +1519,7 @@ html, body {
         <div style="overflow-x:auto">
         <table class="data-table" id="keys-table">
           <thead><tr>
-            <th>ID</th><th>名称</th><th>密钥</th><th>上游密钥</th><th>额度</th><th>已用</th><th>Fast</th><th>并发限制</th><th>当前并发</th><th>创建时间</th><th>操作</th>
+            <th>ID</th><th>名称</th><th>渠道</th><th>密钥</th><th>上游密钥</th><th>额度</th><th>已用</th><th>Fast</th><th>并发限制</th><th>当前并发</th><th>创建时间</th><th>操作</th>
           </tr></thead>
           <tbody id="keys-tbody"></tbody>
         </table>
@@ -1547,7 +1547,7 @@ html, body {
         <div style="overflow-x:auto">
           <table class="data-table">
             <thead><tr>
-              <th></th><th>时间</th><th>Key</th><th>模型</th><th>输入</th><th>输出</th><th>缓存写</th><th>缓存读</th><th>费用</th><th>IP</th>
+              <th></th><th>时间</th><th>渠道</th><th>Key</th><th>模型</th><th>输入</th><th>输出</th><th>缓存写</th><th>缓存读</th><th>费用</th><th>IP</th>
             </tr></thead>
             <tbody id="usage-tbody"></tbody>
           </table>
@@ -1576,7 +1576,7 @@ html, body {
         <div style="overflow-x:auto">
           <table class="data-table">
             <thead><tr>
-              <th></th><th>时间</th><th>Key</th><th>状态</th><th>路径</th><th>模型</th><th>IP</th>
+              <th></th><th>时间</th><th>渠道</th><th>Key</th><th>状态</th><th>路径</th><th>模型</th><th>IP</th>
             </tr></thead>
             <tbody id="error-tbody"></tbody>
           </table>
@@ -1609,7 +1609,7 @@ html, body {
         <div style="overflow-x:auto">
         <table class="data-table">
           <thead><tr>
-            <th>ID</th><th>名称</th><th>密钥</th><th>状态</th><th>熔断</th><th>创建时间</th><th>操作</th>
+            <th>ID</th><th>名称</th><th>渠道</th><th>密钥</th><th>状态</th><th>熔断</th><th>创建时间</th><th>操作</th>
           </tr></thead>
           <tbody id="upstream-tbody"></tbody>
         </table>
@@ -2045,6 +2045,7 @@ function renderFeed(recent) {
   document.getElementById('recent-feed').innerHTML = last10.length ? last10.map(r => `
     <div class="feed-item">
       <span class="feed-time">${fmtTime(r.time)}</span>
+      <span class="feed-channel">${channelTag(r.channel_kind)}</span>
       <span class="feed-model">${esc(r.model)}</span>
       <span class="feed-key">${esc(r.key_name)}</span>
       <span class="feed-cost">$${Number(r.cost_usd || 0).toFixed(6)}</span>
@@ -2074,6 +2075,7 @@ function renderKeys(keys) {
     return `<tr>
       <td class="mono">${k.id}</td>
       <td>${esc(k.name)}</td>
+      <td>${channelTag(k.channel_kind)}</td>
       <td>
         <span class="key-masked" onclick="toggleKeyReveal(this,'${esc(k.key)}')" title="点击显示/复制">${masked}</span>
         <button class="btn btn-sm" style="margin-left:4px;padding:2px 6px;font-size:10px" onclick="copyText('${esc(k.key)}')">复制</button>
@@ -2509,6 +2511,7 @@ function renderUsage(rows) {
     return `<tr style="cursor:pointer" onclick="toggleUsageExpand(${r.id}, 'usage-expand-${i}')">
       <td style="width:20px;color:var(--text-muted)">+</td>
       <td class="mono" style="font-size:11px">${fmtTime(r.time)}</td>
+      <td>${channelTag(r.channel_kind)}</td>
       <td>${esc(r.key_name)}</td>
       <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(r.model)}</td>
       <td class="mono">${fmtNum(r.input_tokens)}</td>
@@ -2519,7 +2522,7 @@ function renderUsage(rows) {
       <td class="mono" style="font-size:11px">${esc(r.ip || '')}</td>
     </tr>
     <tr class="expand-row" id="usage-expand-${i}" style="display:none">
-      <td colspan="10"><pre>加载中...</pre></td>
+      <td colspan="11"><pre>加载中...</pre></td>
     </tr>`;
   }).join('');
 }
@@ -2598,6 +2601,7 @@ function renderErrors(rows) {
     return `<tr style="cursor:pointer" onclick="toggleErrorExpand(${r.id}, 'err-expand-${i}')">
       <td style="width:20px;color:var(--text-muted)">+</td>
       <td class="mono" style="font-size:11px">${fmtTime(r.time)}</td>
+      <td>${channelTag(r.channel_kind)}</td>
       <td>${esc(r.key_name)}</td>
       <td><span class="badge ${badge}">${s}</span></td>
       <td class="mono" style="font-size:11px">${esc(r.path)}</td>
@@ -2605,7 +2609,7 @@ function renderErrors(rows) {
       <td class="mono" style="font-size:11px">${esc(r.ip || '')}</td>
     </tr>
     <tr class="expand-row" id="err-expand-${i}" style="display:none">
-      <td colspan="7"><pre>加载中...</pre></td>
+      <td colspan="8"><pre>加载中...</pre></td>
     </tr>`;
   }).join('');
 }
@@ -2752,7 +2756,7 @@ function renderBreakerCell(id, br) {
 function renderUpstreamKeys(rows) {
   const tbody = document.getElementById('upstream-tbody');
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">暂无上游密钥，点击"添加"创建</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">暂无上游密钥，点击"添加"创建</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map(r => {
@@ -2761,6 +2765,7 @@ function renderUpstreamKeys(rows) {
     return `<tr>
       <td class="mono">${r.id}</td>
       <td>${esc(r.name)}</td>
+      <td>${channelTag(r.channel_kind)}</td>
       <td>
         <span class="key-masked" onclick="toggleKeyReveal(this,'${esc(r.key)}')" title="点击显示/复制">${esc(masked)}</span>
         <button class="btn btn-sm" style="margin-left:4px;padding:2px 6px;font-size:10px" onclick="copyText('${esc(r.key)}')">复制</button>
@@ -2982,9 +2987,9 @@ function applyWsSnapshot(data) {
       const idCell = row.querySelector('td');
       if (!idCell || parseInt(idCell.textContent) !== k.id) continue;
       const cells = row.querySelectorAll('td');
-      // cells: 0=ID 1=名称 2=密钥 3=上游密钥 4=额度 5=已用 6=Fast 7=并发限制 8=当前并发 9=创建时间 10=操作
-      if (cells[8]) cells[8].textContent = String(k.current_concurrency);
-      if (cells[5]) cells[5].textContent = '$' + Number(k.used || 0).toFixed(2);
+      // cells: 0=ID 1=名称 2=渠道 3=密钥 4=上游密钥 5=额度 6=已用 7=Fast 8=并发限制 9=当前并发 10=创建时间 11=操作
+      if (cells[9]) cells[9].textContent = String(k.current_concurrency);
+      if (cells[6]) cells[6].textContent = '$' + Number(k.used || 0).toFixed(2);
       break;
     }
   }
