@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 pub static UPSTREAM_LEAK_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)github|copilot|vertex|individual|enterprise|personal.access.token")
+    Regex::new(r"(?i)github|copilot|vertex|individual|enterprise|stainless|personal.access.token")
         .expect("UPSTREAM_LEAK_RE compile")
 });
 
@@ -29,6 +29,7 @@ mod tests {
         assert!(looks_leaked("individual tier exhausted"));
         assert!(looks_leaked("Enterprise endpoint timeout"));
         assert!(looks_leaked("copilot rate limit"));
+        assert!(looks_leaked("Stainless-Lang detected"));
     }
 
     #[test]

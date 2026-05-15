@@ -136,6 +136,7 @@ mod tests {
             host_whitelist: vec![],
             require_cf_connecting_ip: false,
             log_level: "info".into(),
+            anthropic_rewrite_rules: vec![],
         };
 
         let snapshot = Arc::new(SnapshotVersion::new());
