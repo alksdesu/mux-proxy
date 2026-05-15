@@ -25,6 +25,36 @@ impl RewriteRule {
     }
 }
 
+/// 解析 ``MUX_ANTHROPIC_REWRITE_RULES`` env 串：``prefix1=target1,prefix2=target2``。
+/// 逗号分割条目、等号分割 prefix/target。空字符串/纯空白 → Ok(空 Vec)。
+/// 任何条目缺 ``=``、prefix 空、target 空 → 返 Err 让 Config::from_env 启动 fatal。
+pub fn parse_rewrite_rules(spec: &str) -> Result<Vec<RewriteRule>, String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in trimmed.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((prefix, target)) = entry.split_once('=') else {
+            return Err(format!("rewrite rule missing '=': {entry:?}"));
+        };
+        let prefix = prefix.trim();
+        let target = target.trim();
+        if prefix.is_empty() {
+            return Err(format!("rewrite rule has empty prefix: {entry:?}"));
+        }
+        if target.is_empty() {
+            return Err(format!("rewrite rule has empty target: {entry:?}"));
+        }
+        out.push(RewriteRule::new(prefix, target));
+    }
+    Ok(out)
+}
+
 /// 一次改写的结果。``original_model``/``new_model`` 仅在确实替换时填充，
 /// 便于日志一行记录 ``orig->new`` 又不必重复正则。
 #[derive(Debug, Clone)]
@@ -192,5 +222,43 @@ mod tests {
         assert!(out.rewritten());
         let s = std::str::from_utf8(&out.body).unwrap();
         assert!(s.contains(r#""model"  :   "claude-jupiter-v1-p""#));
+    }
+
+    #[test]
+    fn parse_rewrite_rules_basic() {
+        let rules = parse_rewrite_rules("claude-opus-4-7=claude-jupiter-v1-p,claude-haiku=jupiter-mini")
+            .expect("parse ok");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].prefix, "claude-opus-4-7");
+        assert_eq!(rules[0].target, "claude-jupiter-v1-p");
+        assert_eq!(rules[1].prefix, "claude-haiku");
+        assert_eq!(rules[1].target, "jupiter-mini");
+    }
+
+    #[test]
+    fn parse_rewrite_rules_empty() {
+        assert!(parse_rewrite_rules("").unwrap().is_empty());
+        assert!(parse_rewrite_rules("   ").unwrap().is_empty());
+        // 末尾逗号 / 多余空白 / 内部空条目都视为空，不算 malformed
+        assert_eq!(parse_rewrite_rules("a=b,,").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_rewrite_rules_malformed_errors() {
+        // 缺 '='
+        assert!(parse_rewrite_rules("no-equals-sign").is_err());
+        // prefix 空
+        assert!(parse_rewrite_rules("=target").is_err());
+        // target 空
+        assert!(parse_rewrite_rules("prefix=").is_err());
+        // 多条里有一条坏的，整体拒绝
+        assert!(parse_rewrite_rules("a=b,broken,c=d").is_err());
+    }
+
+    #[test]
+    fn parse_rewrite_rules_trims_around_equals() {
+        let rules = parse_rewrite_rules("  pfx  =  tgt  ").expect("parse ok");
+        assert_eq!(rules[0].prefix, "pfx");
+        assert_eq!(rules[0].target, "tgt");
     }
 }
