@@ -1,5 +1,6 @@
-//! 进程启动：装配 AppState、绑定 axum、接 sigterm/sigint 做受控关停。
-//! 关停信号到达后停止接新连接，已有请求跑完才退出，避免计费日志半截写。
+//! 进程启动：装配 AppState、绑定 hyper http1::Builder、接 sigterm/sigint 做受控关停。
+//! preserve_header_case(true) + title_case_headers(false) 让 Anthropic 渠道 wire 大小写保真。
+//! axum::serve 走 IntoMakeService 路径强制 lowercase header name 写回，故不用。
 
 use crate::auth::{KeyCache, KeyCacheEntry, SingleFlight};
 use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
@@ -10,29 +11,107 @@ use crate::concurrency::Limiter;
 use crate::config::Config;
 use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
+use axum::extract::ConnectInfo;
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::info;
+use tokio::sync::broadcast;
+use tower::Service;
+use tracing::{debug, info, warn};
+
+/// 在 SIGTERM 信号到达后，最多再等这么久让 in-flight 请求跑完，
+/// 防止计费日志半截写。超时后强制退出 accept loop 完成进程退出。
+const GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn run() -> AppResult<()> {
     let cfg = Config::from_env()?;
     init_tracing(&cfg.log_level);
 
-    info!(addr = %cfg.http_addr, "starting copilot-proxy");
+    let bind_addr = cfg.http_addr;
+    info!(addr = %bind_addr, "starting copilot-proxy");
 
-    let state = AppState::init(cfg.clone()).await?;
+    let state = AppState::init(cfg).await?;
     let router = crate::http::router::build(state.clone());
 
-    let listener = TcpListener::bind(cfg.http_addr).await?;
-    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| AppError::Internal(format!("server error: {e}")))?;
+    let listener = TcpListener::bind(bind_addr).await?;
+    info!(addr = %bind_addr, "listening");
 
+    let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1);
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, peer_addr) = match accept {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(error = ?e, "accept failed; backing off 100ms");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                spawn_connection(stream, peer_addr, router.clone(), shutdown_tx.subscribe());
+            }
+            _ = &mut shutdown => {
+                info!("shutdown signal received; closing accept loop");
+                let _ = shutdown_tx.send(());
+                break;
+            }
+        }
+    }
+
+    // 给 in-flight conn task 一段时间完成 graceful_shutdown 后的清理。
+    info!(timeout = ?GRACEFUL_DRAIN_TIMEOUT, "waiting for in-flight requests");
+    tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT).await;
     info!("shutdown complete");
     Ok(())
+}
+
+fn spawn_connection(
+    stream: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    router: axum::Router,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let io = TokioIo::new(stream);
+        let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+            // 把 peer 地址塞 extensions，host_guard / 客户端 IP 提取走 cf-connecting-ip
+            // 优先，本字段是 fallback 用。
+            req.extensions_mut().insert(ConnectInfo(peer_addr));
+            let mut svc = router.clone();
+            async move {
+                let req: hyper::Request<axum::body::Body> =
+                    req.map(axum::body::Body::new);
+                svc.call(req).await
+            }
+        });
+        let conn = http1::Builder::new()
+            .preserve_header_case(true)
+            .title_case_headers(false)
+            .keep_alive(true)
+            .serve_connection(io, svc)
+            .with_upgrades();
+        tokio::pin!(conn);
+        tokio::select! {
+            res = conn.as_mut() => {
+                if let Err(e) = res {
+                    debug!(error = ?e, peer = %peer_addr, "connection ended");
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                conn.as_mut().graceful_shutdown();
+                if let Err(e) = conn.await {
+                    debug!(error = ?e, peer = %peer_addr, "connection drain ended");
+                }
+            }
+        }
+    });
 }
 
 /// 全局共享状态。所有 handler 经 `axum::extract::State` 拿。
