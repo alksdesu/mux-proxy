@@ -1,29 +1,33 @@
 //! Anthropic 渠道主流程：拿 key_pool key → 上游 forward → 四象限响应路由
 //! (is_sse × is_gzip) → 字节透传 / gzip 重压 / SSE tee 计费。
-//! HeaderMap 写入的 mixed-case header 名只有在共享 server 层启用
-//! ``http1::Builder::preserve_header_case(true)`` 之后才能 wire 上保留。
+//! 返 ``hyper::Response<BoxBody>`` 绕开 axum 的 ``IntoResponse``，把上游
+//! ``Response.extensions``（含 hyper 私有 HeaderCaseMap）整体 forward 给共享 server。
 
 use crate::auth::KeyCacheEntry;
 use crate::billing::UsageWriter;
 use crate::channels::anthropic::gzip_passthrough::rewrite_gzip;
 use crate::channels::anthropic::header_case::canonicalize;
-use crate::channels::anthropic::key_pool::{classify_status, pool_empty_error, KeyPool};
+use crate::channels::anthropic::key_pool::{KeyPool, classify_status, pool_empty_error};
 use crate::channels::anthropic::model_restore::rewrite_json_response;
-use crate::channels::anthropic::model_splice::{rewrite_body, RewriteRule};
+use crate::channels::anthropic::model_splice::{RewriteRule, rewrite_body};
 use crate::channels::anthropic::request_strip::is_response_hop_by_hop;
 use crate::channels::anthropic::sse_tee::{
-    spawn_sniffer, try_send_to_sniffer, ForwardSplitter, SniffContext,
+    ForwardSplitter, SniffContext, spawn_sniffer, try_send_to_sniffer,
 };
 use crate::channels::anthropic::upstream_client::AnthropicUpstreamClient;
 use crate::concurrency::ConcurrencyGuard;
 use crate::error::{AppError, AppResult};
 use async_stream::stream;
-use axum::body::Body;
-use axum::response::Response;
 use bytes::{Bytes, BytesMut};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
-use http_body_util::BodyExt;
+use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use http_body::Frame;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
 use std::sync::Arc;
+
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type ProxyBody = BoxBody<Bytes, BoxError>;
+pub type ProxyResponse = Response<ProxyBody>;
 
 /// 大响应字节透传降级阈值。单条响应超过这个值不再 buffer + 改写 model，避免 OOM。
 pub const MAX_RESPONSE_BUFFER: usize = 32 * 1024 * 1024;
@@ -39,7 +43,7 @@ pub struct HandlerContext {
     pub concurrency_guard: ConcurrencyGuard,
 }
 
-/// 单次请求入参。axum extractor 拆出来填进去。
+/// 单次请求入参。共享 server 层 axum extractor / 直连 hyper handler 都能填充。
 pub struct ProxyRequest {
     pub method: Method,
     pub path: String,
@@ -48,8 +52,9 @@ pub struct ProxyRequest {
     pub body: Bytes,
 }
 
-/// 主入口。返回 axum Response，body 是 ``axum::body::Body``（可包流）。
-pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<Response> {
+/// 主入口。返回 ``hyper::Response<BoxBody>``，body 是流或 buffered；
+/// extensions 整体复制自上游响应，让共享 server 的 preserve_header_case 能读到 HeaderCaseMap。
+pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyResponse> {
     let content_type = req
         .headers
         .get(http::header::CONTENT_TYPE)
@@ -58,7 +63,7 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<Respons
         .to_string();
     let outcome = rewrite_body(req.body, &content_type, &ctx.rewrite_rules);
     let request_body_for_log = String::new();
-    let rewritten = outcome.rewritten();
+    let rewritten_marker = outcome.rewritten();
     let original_model = outcome.original_model.clone();
     let new_model = outcome.new_model.clone();
 
@@ -93,6 +98,7 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<Respons
 
     let (parts, body) = upstream.into_parts();
     let resp_headers = parts.headers;
+    let resp_extensions = parts.extensions;
     let content_type_resp = lower_header_str(&resp_headers, http::header::CONTENT_TYPE);
     let content_encoding = lower_header_str(&resp_headers, http::header::CONTENT_ENCODING);
     let is_sse = content_type_resp.contains("text/event-stream");
@@ -101,19 +107,32 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<Respons
 
     let prepared_headers = build_response_headers(&resp_headers);
 
-    if !rewritten {
-        return Ok(forward_body_as_is(status, prepared_headers, body));
+    if !rewritten_marker {
+        return Ok(forward_body_as_is(
+            status,
+            prepared_headers,
+            resp_extensions,
+            body,
+        ));
     }
 
     let (current_model, original_model) = match (new_model, original_model) {
         (Some(c), Some(o)) => (c, o),
-        _ => return Ok(forward_body_as_is(status, prepared_headers, body)),
+        _ => {
+            return Ok(forward_body_as_is(
+                status,
+                prepared_headers,
+                resp_extensions,
+                body,
+            ));
+        }
     };
 
     if is_sse && !is_gzip {
         return Ok(sse_tee_response(
             status,
             prepared_headers,
+            resp_extensions,
             body,
             current_model,
             original_model,
@@ -128,7 +147,12 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<Respons
     let buffered = match collect_with_cap(body, MAX_RESPONSE_BUFFER).await {
         Ok(b) => b,
         Err(CollectError::OverCap(stream_pass)) => {
-            return Ok(forward_buffered(status, prepared_headers, stream_pass));
+            return Ok(forward_buffered(
+                status,
+                prepared_headers,
+                resp_extensions,
+                stream_pass,
+            ));
         }
         Err(CollectError::Io(e)) => {
             return Err(AppError::Upstream(format!("read upstream body: {e}")));
@@ -145,7 +169,12 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<Respons
         buffered
     };
 
-    Ok(forward_buffered(status, prepared_headers, rewritten))
+    Ok(forward_buffered(
+        status,
+        prepared_headers,
+        resp_extensions,
+        rewritten,
+    ))
 }
 
 fn lower_header_str(headers: &HeaderMap, name: http::HeaderName) -> String {
@@ -156,6 +185,9 @@ fn lower_header_str(headers: &HeaderMap, name: http::HeaderName) -> String {
         .to_ascii_lowercase()
 }
 
+/// 剥 hop-by-hop 后构造 (name, value) 列表，name 走 canonical case 表查一次。
+/// ``HeaderName::from_bytes`` 内部仍把 buf 小写化，wire 大小写真正来自上游 extensions 里的
+/// HeaderCaseMap，server preserve_header_case 启用后即可保真。
 fn build_response_headers(src: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
     let mut out: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(src.len());
     for (name, value) in src.iter() {
@@ -173,46 +205,53 @@ fn build_response_headers(src: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
     out
 }
 
-fn apply_headers(builder: http::response::Builder, headers: Vec<(HeaderName, HeaderValue)>) -> http::response::Builder {
-    let mut b = builder;
+fn assemble_response<B>(
+    status: StatusCode,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    extensions: Extensions,
+    body: B,
+) -> Response<B> {
+    let mut builder = Response::builder().status(status);
     for (name, value) in headers {
-        b = b.header(name, value);
+        builder = builder.header(name, value);
     }
-    b
+    let mut resp = builder.body(body).expect("response builder valid parts");
+    *resp.extensions_mut() = extensions;
+    resp
+}
+
+fn full_body(bytes: Bytes) -> ProxyBody {
+    Full::new(bytes).map_err(|e| Box::new(e) as BoxError).boxed()
 }
 
 fn forward_body_as_is(
     status: StatusCode,
     headers: Vec<(HeaderName, HeaderValue)>,
+    extensions: Extensions,
     body: hyper::body::Incoming,
-) -> Response {
-    let stream_body = Body::new(body.map_err(|e| std::io::Error::other(e.to_string())));
-    let builder = http::Response::builder().status(status);
-    apply_headers(builder, headers)
-        .body(stream_body)
-        .expect("response builder must accept valid parts")
+) -> ProxyResponse {
+    let boxed = body.map_err(|e| Box::new(e) as BoxError).boxed();
+    assemble_response(status, headers, extensions, boxed)
 }
 
 fn forward_buffered(
     status: StatusCode,
     headers: Vec<(HeaderName, HeaderValue)>,
+    extensions: Extensions,
     body: Bytes,
-) -> Response {
-    let builder = http::Response::builder().status(status);
-    apply_headers(builder, headers)
-        .body(Body::from(body))
-        .expect("response builder must accept valid parts")
+) -> ProxyResponse {
+    assemble_response(status, headers, extensions, full_body(body))
 }
 
-fn bad_gateway_response(err: &AppError) -> Response {
+fn bad_gateway_response(err: &AppError) -> ProxyResponse {
     let body = serde_json::json!({
         "error": {"type": "upstream_error", "message": err.to_string()}
     })
     .to_string();
-    http::Response::builder()
+    Response::builder()
         .status(StatusCode::BAD_GATEWAY)
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
+        .body(full_body(Bytes::from(body)))
         .expect("bad gateway response build")
 }
 
@@ -220,6 +259,7 @@ fn bad_gateway_response(err: &AppError) -> Response {
 fn sse_tee_response(
     status: StatusCode,
     headers: Vec<(HeaderName, HeaderValue)>,
+    extensions: Extensions,
     upstream: hyper::body::Incoming,
     current_model: String,
     original_model: String,
@@ -228,7 +268,7 @@ fn sse_tee_response(
     request_body: String,
     ip: Option<String>,
     guard: ConcurrencyGuard,
-) -> Response {
+) -> ProxyResponse {
     let (sniffer_tx, sniffer_handle) = spawn_sniffer(SniffContext {
         writer,
         key_name,
@@ -241,34 +281,30 @@ fn sse_tee_response(
     let body_stream = stream! {
         let _guard = guard;
         let _handle = sniffer_handle;
-        let _tx = sniffer_tx.clone();
         loop {
             match upstream.frame().await {
                 Some(Ok(frame)) => {
                     if let Ok(data) = frame.into_data() {
                         try_send_to_sniffer(&sniffer_tx, data.clone());
                         for ev in splitter.ingest_chunk(data) {
-                            yield Ok::<_, std::io::Error>(ev);
+                            yield Ok::<Frame<Bytes>, BoxError>(Frame::data(ev));
                         }
                     }
                 }
                 Some(Err(e)) => {
-                    yield Err(std::io::Error::other(e.to_string()));
+                    yield Err(Box::new(e) as BoxError);
                     break;
                 }
                 None => break,
             }
         }
         if let Some(tail) = splitter.flush() {
-            yield Ok(tail);
+            yield Ok(Frame::data(tail));
         }
         drop(sniffer_tx);
     };
-    let body = Body::from_stream(body_stream);
-    let builder = http::Response::builder().status(status);
-    apply_headers(builder, headers)
-        .body(body)
-        .expect("sse response builder")
+    let body = StreamBody::new(body_stream).boxed();
+    assemble_response(status, headers, extensions, body)
 }
 
 enum CollectError {
@@ -331,5 +367,16 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(ct, "application/json");
+    }
+
+    #[test]
+    fn assemble_preserves_extensions() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Marker(u32);
+        let mut ext = Extensions::new();
+        ext.insert(Marker(7));
+        let body = full_body(Bytes::from_static(b"x"));
+        let resp = assemble_response(StatusCode::OK, vec![], ext, body);
+        assert_eq!(resp.extensions().get::<Marker>(), Some(&Marker(7)));
     }
 }
