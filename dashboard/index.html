@@ -31,6 +31,23 @@
   --orange-dim: rgba(245, 158, 11, 0.12);
   --purple: #a78bfa;
   --purple-dim: rgba(167, 139, 250, 0.12);
+  --yellow: #ffc107;
+  --yellow-dim: #3d3200;
+  --chart-1: #3b82f6;
+  --chart-2: #22c55e;
+  --chart-3: #f59e0b;
+  --chart-4: #ef4444;
+  --chart-5: #a78bfa;
+  --chart-6: #06b6d4;
+  --chart-7: #ec4899;
+  --chart-8: #84cc16;
+  --chart-axis: #a1a1aa;
+  --chart-grid: #27272a;
+  --chart-req-line: #3b82f6;
+  --chart-req-fill: rgba(59, 130, 246, 0.08);
+  --chart-cost-line: #22c55e;
+  --chart-cost-fill: rgba(34, 197, 94, 0.08);
+  --map-marker: #3b82f6;
   --sidebar-w: 220px;
   --radius: 8px;
   --radius-sm: 5px;
@@ -529,7 +546,7 @@ html, body {
 
 .badge-green { background: var(--green-dim); color: var(--green); }
 .badge-red { background: var(--red-dim); color: var(--red); }
-.badge-yellow { background: #3d3200; color: #ffc107; }
+.badge-yellow { background: var(--yellow-dim); color: var(--yellow); }
 .badge-orange { background: var(--orange-dim); color: var(--orange); }
 .badge-purple { background: var(--purple-dim); color: var(--purple); }
 .badge-blue { background: var(--accent-dim); color: var(--accent); }
@@ -1805,11 +1822,18 @@ let usageData = [];
 // chart instances
 let chartRequests = null, chartCost = null, chartModels = null, chartKeys = null;
 
-const chartColors = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#a78bfa','#06b6d4','#ec4899','#84cc16'];
+// 从 :root 读 CSS var：设计系统颜色单一来源，避免 hex 散落在 JS。
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const chartColors = ['--chart-1','--chart-2','--chart-3','--chart-4','--chart-5','--chart-6','--chart-7','--chart-8'].map(cssVar);
 const chartDefaults = {
-  color: '#a1a1aa',
-  borderColor: '#27272a',
+  color: cssVar('--chart-axis'),
+  borderColor: cssVar('--chart-grid'),
 };
+const chartReqLine = cssVar('--chart-req-line');
+const chartReqFill = cssVar('--chart-req-fill');
+const chartCostLine = cssVar('--chart-cost-line');
+const chartCostFill = cssVar('--chart-cost-fill');
+const mapMarkerColor = cssVar('--map-marker');
 
 Chart.defaults.color = chartDefaults.color;
 Chart.defaults.borderColor = chartDefaults.borderColor;
@@ -2005,7 +2029,7 @@ function renderCharts(stats, ts) {
   if (chartRequests) chartRequests.destroy();
   chartRequests = new Chart(document.getElementById('chart-requests'), {
     type: 'line',
-    data: { labels, datasets: [{ label: 'Requests', data: reqData, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)', fill: true, tension: 0.3, borderWidth: 1.5 }] },
+    data: { labels, datasets: [{ label: 'Requests', data: reqData, borderColor: chartReqLine, backgroundColor: chartReqFill, fill: true, tension: 0.3, borderWidth: 1.5 }] },
     options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true }, x: { grid: { display: false } } } }
   });
 
@@ -2013,7 +2037,7 @@ function renderCharts(stats, ts) {
   if (chartCost) chartCost.destroy();
   chartCost = new Chart(document.getElementById('chart-cost'), {
     type: 'line',
-    data: { labels, datasets: [{ label: 'Cost ($)', data: costData, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.08)', fill: true, tension: 0.3, borderWidth: 1.5 }] },
+    data: { labels, datasets: [{ label: 'Cost ($)', data: costData, borderColor: chartCostLine, backgroundColor: chartCostFill, fill: true, tension: 0.3, borderWidth: 1.5 }] },
     options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true }, x: { grid: { display: false } } } }
   });
 
@@ -2073,32 +2097,32 @@ function renderKeys(keys) {
     const isDirect = uKey !== '*' && !/^\d+(,\d+)*$/.test(uKey);
     const uDisplay = isDirect ? (uKey.length > 20 ? uKey.slice(0, 15) + '...' + uKey.slice(-4) : uKey) : '全局池';
     return `<tr>
-      <td class="mono">${k.id}</td>
-      <td>${esc(k.name)}</td>
-      <td>${channelTag(k.channel_kind)}</td>
-      <td>
+      <td class="mono" data-col="id">${k.id}</td>
+      <td data-col="name">${esc(k.name)}</td>
+      <td data-col="channel">${channelTag(k.channel_kind)}</td>
+      <td data-col="key">
         <span class="key-masked" onclick="toggleKeyReveal(this,'${esc(k.key)}')" title="点击显示/复制">${masked}</span>
         <button class="btn btn-sm" style="margin-left:4px;padding:2px 6px;font-size:10px" onclick="copyText('${esc(k.key)}')">复制</button>
       </td>
-      <td>
+      <td data-col="upstream_key">
         ${isDirect
           ? `<span class="key-masked" onclick="toggleKeyReveal(this,'${esc(uKey)}')" title="点击显示/复制">${esc(uDisplay)}</span>
              <button class="btn btn-sm" style="margin-left:4px;padding:2px 6px;font-size:10px" onclick="copyText('${esc(uKey)}')">复制</button>`
           : `<span class="badge badge-blue">全局池</span>`
         }
       </td>
-      <td>
+      <td data-col="quota">
         <span class="mono editable" title="双击编辑" ondblclick="startInlineEdit(this,${k.id},'quota',${k.quota})">${k.quota_display}</span>
         ${pct >= 0 ? `<div class="progress-bar"><div class="progress-fill ${pctClass}" style="width:${pct}%"></div></div>` : ''}
       </td>
-      <td class="mono">${k.used_display}</td>
-      <td>
+      <td class="mono" data-col="used">${k.used_display}</td>
+      <td data-col="allow_fast">
         <span class="badge ${k.allow_fast ? 'badge-green' : 'badge-red'}" style="cursor:pointer" onclick="toggleFast(${k.id},${k.allow_fast})">${k.allow_fast ? 'ON' : 'OFF'}</span>
       </td>
-      <td><span class="mono editable" title="双击编辑" ondblclick="startInlineEdit(this,${k.id},'max_concurrency',${k.max_concurrency})">${k.max_concurrency === -1 ? '∞' : k.max_concurrency}</span></td>
-      <td class="mono">${k.current_concurrency}</td>
-      <td class="mono" style="font-size:11px">${fmtDate(k.created_at)}</td>
-      <td style="white-space:nowrap">
+      <td data-col="max_concurrency"><span class="mono editable" title="双击编辑" ondblclick="startInlineEdit(this,${k.id},'max_concurrency',${k.max_concurrency})">${k.max_concurrency === -1 ? '∞' : k.max_concurrency}</span></td>
+      <td class="mono" data-col="current_concurrency">${k.current_concurrency}</td>
+      <td class="mono" data-col="created_at" style="font-size:11px">${fmtDate(k.created_at)}</td>
+      <td data-col="actions" style="white-space:nowrap">
         <button class="btn btn-sm" onclick="openEditKey(${k.id})">编辑</button>
         <button class="btn btn-sm" onclick="openKeyHistory(${k.id})">记录</button>
         <button class="btn btn-sm" onclick="exportKeyUsage(${k.id})">导出</button>
@@ -2615,9 +2639,11 @@ function renderErrors(rows) {
 }
 
 function confirmClearErrors() {
+  // 当前渠道有过滤就按渠道删；'全部' 走 ?confirm=yes 显式确认，防 curl 手抖。
+  const scope = currentChannel === 'all' ? '?confirm=yes' : `?channel=${encodeURIComponent(currentChannel)}`;
   showConfirm('清空所有错误？', '此操作不可撤销。', async () => {
     try {
-      await api('DELETE', '/admin/errors');
+      await api('DELETE', '/admin/errors' + scope);
       toast('错误日志已清空', 'success');
       loadErrors();
     } catch(e) { toast('操作失败', 'error'); }
@@ -2698,9 +2724,9 @@ async function plotIPs(ips) {
     const radius = Math.max(6, Math.min(30, (row.request_count / maxCount) * 30));
     const marker = L.circleMarker([geo.lat, geo.lon], {
       radius,
-      fillColor: '#3b82f6',
+      fillColor: mapMarkerColor,
       fillOpacity: 0.5,
-      color: '#3b82f6',
+      color: mapMarkerColor,
       weight: 1,
     }).addTo(mapInstance);
     marker.bindPopup(`
@@ -2982,16 +3008,17 @@ function applyWsSnapshot(data) {
   if (!data) return;
   const visible = pickChannelKeys(data);
   for (const k of visible) {
-    const rows = document.querySelectorAll('#keys-tbody tr');
-    for (const row of rows) {
-      const idCell = row.querySelector('td');
-      if (!idCell || parseInt(idCell.textContent) !== k.id) continue;
-      const cells = row.querySelectorAll('td');
-      // cells: 0=ID 1=名称 2=渠道 3=密钥 4=上游密钥 5=额度 6=已用 7=Fast 8=并发限制 9=当前并发 10=创建时间 11=操作
-      if (cells[9]) cells[9].textContent = String(k.current_concurrency);
-      if (cells[6]) cells[6].textContent = '$' + Number(k.used || 0).toFixed(2);
-      break;
-    }
+    const row = document.querySelector(`#keys-tbody tr td[data-col="id"]`)
+      ? Array.from(document.querySelectorAll('#keys-tbody tr')).find(tr => {
+          const idCell = tr.querySelector('td[data-col="id"]');
+          return idCell && parseInt(idCell.textContent) === k.id;
+        })
+      : null;
+    if (!row) continue;
+    const usedCell = row.querySelector('td[data-col="used"]');
+    const concCell = row.querySelector('td[data-col="current_concurrency"]');
+    if (usedCell) usedCell.textContent = '$' + Number(k.used || 0).toFixed(2);
+    if (concCell) concCell.textContent = String(k.current_concurrency);
   }
   if (Array.isArray(data.breaker)) {
     const filtered = currentChannel === 'all'

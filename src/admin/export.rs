@@ -13,6 +13,8 @@ use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::io;
+use tracing::error;
 
 pub async fn handler(
     State(state): State<AppState>,
@@ -30,10 +32,11 @@ pub async fn handler(
 
     let db = state.db.clone();
     let stream = async_stream::stream! {
-        yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"[\n"));
+        yield Ok::<Bytes, io::Error>(Bytes::from_static(b"[\n"));
         let key_ref = key_owned.as_deref();
         let mut s = db::usage::export_usage_stream(&db, key_ref, channel);
         let mut first = true;
+        let mut aborted = false;
         while let Some(item) = s.next().await {
             match item {
                 Ok(row) => {
@@ -45,10 +48,19 @@ pub async fn handler(
                     buf.extend_from_slice(&line);
                     yield Ok(Bytes::from(buf));
                 }
-                Err(_) => break,
+                Err(e) => {
+                    error!(error = ?e, "export stream aborted, JSON truncated intentionally");
+                    aborted = true;
+                    yield Err(io::Error::other(format!("db stream: {e}")));
+                    break;
+                }
             }
         }
-        yield Ok(Bytes::from_static(b"\n]\n"));
+        if !aborted {
+            yield Ok(Bytes::from_static(b"\n]\n"));
+        }
+        // aborted=true 时故意不 yield 闭合 `]`，让客户端 JSON.parse 直接失败，
+        // 比静默截断成"看起来合法但内容残缺"的文件安全得多。
     };
 
     let body = Body::from_stream(stream);

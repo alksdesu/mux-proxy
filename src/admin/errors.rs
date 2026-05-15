@@ -76,6 +76,75 @@ pub async fn delete_handler(
 ) -> AppResult<axum::response::Response> {
     let channel = parse_channel(params.get("channel").map(String::as_str))?;
     let key = params.get("key").map(String::as_str);
+    let confirm = matches!(params.get("confirm").map(String::as_str), Some("yes"));
+    // 全表清空必须 ?confirm=yes 显式触发，否则手抖 curl 不带任何 query 就灭全表。
+    if key.is_none() && channel.is_none() && !confirm {
+        return Err(AppError::BadRequest(
+            "global delete requires ?confirm=yes; scope with ?key= or ?channel= otherwise"
+                .into(),
+        ));
+    }
     let n = db::errors::delete_all(&state.db, key, channel).await?;
     Ok(Json(serde_json::json!({ "ok": true, "deleted": n })).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_params() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn params_with(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn assert_global_delete_requires_confirm(p: &HashMap<String, String>) {
+        let channel = parse_channel(p.get("channel").map(String::as_str)).unwrap();
+        let key = p.get("key").map(String::as_str);
+        let confirm = matches!(p.get("confirm").map(String::as_str), Some("yes"));
+        assert!(
+            !(key.is_none() && channel.is_none() && !confirm),
+            "global delete must be blocked when no scope and no confirm: {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn delete_without_scope_or_confirm_rejected() {
+        let p = empty_params();
+        let channel = parse_channel(p.get("channel").map(String::as_str)).unwrap();
+        let key = p.get("key").map(String::as_str);
+        let confirm = matches!(p.get("confirm").map(String::as_str), Some("yes"));
+        let blocked = key.is_none() && channel.is_none() && !confirm;
+        assert!(blocked, "empty params must be blocked");
+    }
+
+    #[test]
+    fn delete_with_key_allowed() {
+        assert_global_delete_requires_confirm(&params_with(&[("key", "alice")]));
+    }
+
+    #[test]
+    fn delete_with_channel_allowed() {
+        assert_global_delete_requires_confirm(&params_with(&[("channel", "copilot")]));
+    }
+
+    #[test]
+    fn delete_with_confirm_yes_allowed() {
+        assert_global_delete_requires_confirm(&params_with(&[("confirm", "yes")]));
+    }
+
+    #[test]
+    fn delete_with_confirm_other_value_blocked() {
+        let p = params_with(&[("confirm", "true")]);
+        let channel = parse_channel(p.get("channel").map(String::as_str)).unwrap();
+        let key = p.get("key").map(String::as_str);
+        let confirm = matches!(p.get("confirm").map(String::as_str), Some("yes"));
+        assert!(
+            key.is_none() && channel.is_none() && !confirm,
+            "confirm=true must NOT pass; only confirm=yes is the explicit token"
+        );
+    }
 }

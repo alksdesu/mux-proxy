@@ -20,7 +20,7 @@ use tracing::warn;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Default)]
 pub struct ChannelTotals {
     pub requests: i64,
     pub errors: i64,
@@ -73,23 +73,40 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             },
         }
     }
+    // 主循环退出前显式发 Close frame，避免客户端依赖 TCP FIN/RST 才察觉断开（1-2s 延迟）。
+    let _ = socket.close().await;
 }
 
 async fn authenticate(socket: &mut WebSocket, state: &AppState) -> bool {
-    match timeout(AUTH_TIMEOUT, socket.recv()).await {
-        Ok(Some(Ok(Message::Text(t)))) => {
-            let Ok(v) = serde_json::from_str::<Value>(&t) else {
-                return false;
-            };
-            v.get("type").and_then(Value::as_str) == Some("auth")
-                && v.get("key").and_then(Value::as_str) == Some(state.cfg.admin_key.as_str())
+    let deadline = Instant::now() + AUTH_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
         }
-        _ => false,
+        match timeout(remaining, socket.recv()).await {
+            Ok(Some(Ok(Message::Text(t)))) => {
+                let Ok(v) = serde_json::from_str::<Value>(&t) else {
+                    return false;
+                };
+                return v.get("type").and_then(Value::as_str) == Some("auth")
+                    && v.get("key").and_then(Value::as_str)
+                        == Some(state.cfg.admin_key.as_str());
+            }
+            // 窗口内的 Ping / Pong / Binary 等非 Text 帧忽略继续等，浏览器层 keep-alive 不该被误杀。
+            Ok(Some(Ok(_))) => continue,
+            // 流被关闭、传输错误、超时 → 失败。
+            Ok(Some(Err(_))) | Ok(None) | Err(_) => return false,
+        }
     }
 }
 
 pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::AppError> {
-    let keys = db::keys::list(&state.db, None, 5000, 0).await?;
+    let (keys, totals_map) = tokio::try_join!(
+        db::keys::list(&state.db, None, 5000, 0),
+        fetch_channel_totals(state),
+    )?;
+
     let snapshot_keys: Vec<KeyEntry> =
         keys.into_iter().map(|k| key_entry(state, k)).collect();
 
@@ -103,8 +120,8 @@ pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::App
             .push(entry.clone());
     }
 
-    let totals_copilot = channel_totals(state, ChannelKind::Copilot).await?;
-    let totals_anthropic = channel_totals(state, ChannelKind::Anthropic).await?;
+    let totals_copilot = totals_map.get(&ChannelKind::Copilot).copied().unwrap_or_default();
+    let totals_anthropic = totals_map.get(&ChannelKind::Anthropic).copied().unwrap_or_default();
     let totals = ChannelTotals {
         requests: totals_copilot.requests + totals_anthropic.requests,
         errors: totals_copilot.errors + totals_anthropic.errors,
@@ -131,25 +148,53 @@ pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::App
     }))
 }
 
-async fn channel_totals(
+/// 一条 LEFT JOIN 查 usage_logs + error_logs 按 channel_kind 汇总，
+/// 替代之前每个渠道 3 次串行 (total_requests / total_errors / cost SUM)。
+async fn fetch_channel_totals(
     state: &AppState,
-    channel: ChannelKind,
-) -> Result<ChannelTotals, crate::error::AppError> {
-    let requests = db::stats::total_requests(&state.db, Some(channel)).await?;
-    let errors = db::stats::total_errors(&state.db, Some(channel)).await?;
-    let row = sqlx::query(
-        "SELECT COALESCE(SUM(cost_usd), 0)::DOUBLE PRECISION AS total \
-         FROM usage_logs WHERE channel_kind = $1",
+) -> Result<HashMap<ChannelKind, ChannelTotals>, crate::error::AppError> {
+    let rows = sqlx::query(
+        "SELECT u.channel_kind AS ch, \
+                u.requests AS requests, \
+                COALESCE(u.cost_total, 0)::DOUBLE PRECISION AS cost_total, \
+                COALESCE(e.errors, 0)::BIGINT AS errors \
+         FROM ( \
+             SELECT channel_kind, \
+                    COUNT(*) AS requests, \
+                    COALESCE(SUM(cost_usd), 0) AS cost_total \
+             FROM usage_logs \
+             GROUP BY channel_kind \
+         ) u \
+         FULL OUTER JOIN ( \
+             SELECT channel_kind, COUNT(*) AS errors \
+             FROM error_logs \
+             GROUP BY channel_kind \
+         ) e ON u.channel_kind = e.channel_kind",
     )
-    .bind(channel.as_str())
-    .fetch_one(state.db.pool())
+    .fetch_all(state.db.pool())
     .await?;
-    let cost: f64 = row.try_get("total")?;
-    Ok(ChannelTotals {
-        requests,
-        errors,
-        cost: round2(cost),
-    })
+
+    let mut out: HashMap<ChannelKind, ChannelTotals> = HashMap::new();
+    for row in rows {
+        let ch_str: Option<String> = row.try_get("ch").ok();
+        // FULL OUTER JOIN 在 errors-only 渠道（usage 为空）会让 u.channel_kind=NULL。
+        // 该路径下我们用 e.channel_kind，但 SELECT 取的是 u.channel_kind 别名 ch；
+        // 极端情况丢这条统计可接受（生产 0 usage 才进），监控可加日志。
+        let Some(ch_str) = ch_str else { continue };
+        let Some(ch) = ChannelKind::parse(&ch_str) else { continue };
+        let requests: i64 = row.try_get("requests").unwrap_or(0);
+        let cost: f64 = row.try_get("cost_total").unwrap_or(0.0);
+        let errors: i64 = row.try_get("errors").unwrap_or(0);
+        out.insert(
+            ch,
+            ChannelTotals {
+                requests,
+                errors,
+                cost: round2(cost),
+            },
+        );
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,6 +260,14 @@ mod tests {
         let t = ChannelTotals { requests: 5, errors: 1, cost: 0.42 };
         let v = serde_json::to_value(&t).expect("serializable");
         assert_eq!(v, json!({"requests": 5, "errors": 1, "cost": 0.42}));
+    }
+
+    #[test]
+    fn channel_totals_default_zero() {
+        let t = ChannelTotals::default();
+        assert_eq!(t.requests, 0);
+        assert_eq!(t.errors, 0);
+        assert_eq!(t.cost, 0.0);
     }
 
     #[test]
