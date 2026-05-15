@@ -29,7 +29,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> AppResult<Self> {
-        let http_port: u16 = env_or("PORT", "3000").parse()
+        let http_port: u16 = env_or("PORT", "7777").parse()
             .map_err(|e| AppError::Config(format!("invalid PORT: {e}")))?;
         let http_addr = SocketAddr::from(([0, 0, 0, 0], http_port));
 
