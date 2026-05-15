@@ -1,5 +1,5 @@
-//! 上游 key 429 滑窗熔断。窗口内累计达阈值就 disable，过 recover 时长自动恢复并清零。
-//! threshold/window/recover 数值与旧 TS 版完全一致，便于灰度对比观测。
+//! 上游 key 429 累计熔断（重置式固定窗口）。窗口内累计达阈值 disable，过 recover 自动恢复。
+//! threshold/window/recover 与旧 TS 版一致便于灰度观测；TS 版也是重置式不是真滑动窗口。
 
 use dashmap::DashMap;
 use std::time::{Duration, Instant};

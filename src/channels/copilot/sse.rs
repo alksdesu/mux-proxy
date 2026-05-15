@@ -1,9 +1,5 @@
-//! SSE 解析 + 清洗 + 计费提取。设计成纯状态机：
-//! - feed(chunk) → 返回需要写给客户端的字节段；
-//! - finish() → flush 残留 buffer。
-//!
-//! 关键约束：stream_usage_recorded 必须在 spawn write_usage 前**同步**置位，
-//! 否则 finally 看到 false 会再写一笔重复账。
+//! SSE 解析 + 清洗 + 计费提取。纯状态机：feed(chunk)/finish() 双方法。
+//! race 关键约束见 SseStats.usage_recorded 字段 doc。
 
 use crate::channels::copilot::direct::DirectFlags;
 use crate::channels::copilot::response_xform::sanitize_sse_event;
@@ -30,8 +26,9 @@ pub struct SseStats {
     pub stream_start_usage: Option<StreamStartUsage>,
     pub final_usage: Option<FinalUsage>,
     pub stream_model: Option<String>,
-    /// 计费写出 race 标记：transform_data_line 内部命中 message_delta 即置 true，
-    /// 由 handler 用来判定 finally 是否要补偿写 partial。
+    /// 计费 race 标记：必须在 message_delta 分支**同步**置 true，禁止放进
+    /// spawn / `.then()` 回调；否则 handler finally 看到 false 会再写一笔重复账。
+    /// 由 fallback_partial_usage 用来判定流异常时是否需要补偿 partial 写入。
     pub usage_recorded: bool,
 }
 
