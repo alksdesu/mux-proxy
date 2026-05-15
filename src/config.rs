@@ -1,5 +1,6 @@
 //! 全局配置。所有可调项都从环境变量加载，启动失败时直接 panic 不要静默。
 
+use crate::channels::anthropic::model_splice::{RewriteRule, parse_rewrite_rules};
 use crate::error::{AppError, AppResult};
 use std::env;
 use std::net::SocketAddr;
@@ -20,6 +21,7 @@ pub struct Config {
     pub copilot_upstream_timeout_unary: Duration,
     pub anthropic_upstream_base: String,
     pub anthropic_upstream_timeout: Duration,
+    pub anthropic_rewrite_rules: Vec<RewriteRule>,
     pub host_whitelist: Vec<String>,
     pub require_cf_connecting_ip: bool,
     pub log_level: String,
@@ -60,6 +62,11 @@ impl Config {
             .filter(|s| !s.is_empty())
             .collect();
 
+        let anthropic_rewrite_rules = parse_rewrite_rules(
+            &env::var("MUX_ANTHROPIC_REWRITE_RULES").unwrap_or_default(),
+        )
+        .map_err(|e| AppError::Config(format!("invalid MUX_ANTHROPIC_REWRITE_RULES: {e}")))?;
+
         Ok(Config {
             http_addr,
             tls_addr,
@@ -80,6 +87,7 @@ impl Config {
             anthropic_upstream_timeout: Duration::from_secs(
                 env_or("ANTHROPIC_TIMEOUT", "600").parse().unwrap_or(600),
             ),
+            anthropic_rewrite_rules,
             host_whitelist,
             require_cf_connecting_ip: env_or("REQUIRE_CF_CONNECTING_IP", "false")
                 .parse()
