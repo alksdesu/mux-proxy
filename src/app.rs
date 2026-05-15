@@ -3,11 +3,15 @@
 
 use crate::auth::{KeyCache, KeyCacheEntry, SingleFlight};
 use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
+use crate::channels::anthropic::key_pool::KeyPool as AnthropicKeyPool;
+use crate::channels::anthropic::upstream_client::AnthropicUpstreamClient;
+use crate::channels::copilot::{Breaker as CopilotBreaker, SessionTokenCache, UpstreamPool as CopilotPool};
 use crate::concurrency::Limiter;
 use crate::config::Config;
 use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
@@ -44,6 +48,14 @@ pub struct AppState {
     pub usage_writer: UsageWriter,
     /// admin 写 upstream_keys 时 bump，让 key_pool 下一轮 acquire 强制重读。
     pub upstream_notifier: UpstreamChangeNotifier,
+    /// Copilot 渠道运行时：池 / 熔断 / session token / 共享 HTTP 客户端。
+    pub copilot_breaker: Arc<CopilotBreaker>,
+    pub copilot_pool: Arc<CopilotPool>,
+    pub copilot_session: Arc<SessionTokenCache>,
+    pub copilot_http: Arc<reqwest::Client>,
+    /// Anthropic 渠道运行时：官方 key 池 + 字节保真 hyper 上游客户端。
+    pub anthropic_pool: Arc<AnthropicKeyPool>,
+    pub anthropic_client: AnthropicUpstreamClient,
 }
 
 impl AppState {
@@ -55,6 +67,33 @@ impl AppState {
         tokio::spawn(limiter.clone().run_gc());
 
         let usage_writer = UsageWriter::new(db.clone(), spend.clone(), snapshot.clone());
+        let upstream_notifier = UpstreamChangeNotifier::new();
+
+        // 共享 reqwest 客户端：Copilot handler / session_token / web_search 都走它。
+        // 禁自动 redirect；超时由各 caller 通过 .timeout() 显式给。
+        let copilot_http = Arc::new(
+            reqwest::Client::builder()
+                .pool_idle_timeout(Duration::from_secs(90))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| AppError::Internal(format!("build copilot reqwest client: {e}")))?,
+        );
+
+        let copilot_breaker = Arc::new(CopilotBreaker::new());
+        let copilot_pool = CopilotPool::new(
+            db.clone(),
+            copilot_breaker.clone(),
+            upstream_notifier.handle(),
+        );
+        let copilot_session = SessionTokenCache::with_client((*copilot_http).clone());
+
+        let anthropic_pool = AnthropicKeyPool::new(db.clone(), upstream_notifier.clone());
+        tokio::spawn(anthropic_pool.clone().run_change_listener());
+
+        let anthropic_client = AnthropicUpstreamClient::new(
+            &cfg.anthropic_upstream_base,
+            cfg.anthropic_upstream_timeout,
+        )?;
 
         Ok(Self {
             cfg: Arc::new(cfg),
@@ -65,7 +104,13 @@ impl AppState {
             limiter,
             snapshot,
             usage_writer,
-            upstream_notifier: UpstreamChangeNotifier::new(),
+            upstream_notifier,
+            copilot_breaker,
+            copilot_pool,
+            copilot_session,
+            copilot_http,
+            anthropic_pool,
+            anthropic_client,
         })
     }
 }

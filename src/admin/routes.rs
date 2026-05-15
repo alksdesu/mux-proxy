@@ -114,6 +114,11 @@ mod tests {
         use crate::app::AppState;
         use crate::auth::{KeyCache, SingleFlight};
         use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
+        use crate::channels::anthropic::key_pool::KeyPool as AnthropicKeyPool;
+        use crate::channels::anthropic::upstream_client::AnthropicUpstreamClient;
+        use crate::channels::copilot::{
+            Breaker as CopilotBreaker, SessionTokenCache, UpstreamPool as CopilotPool,
+        };
         use crate::concurrency::Limiter;
         use crate::config::Config;
         use crate::db::upstream::UpstreamChangeNotifier;
@@ -144,6 +149,24 @@ mod tests {
         let limiter = Limiter::new(snapshot.clone());
         let db = stub_db();
         let usage_writer = UsageWriter::new(db.clone(), spend.clone(), snapshot.clone());
+        let upstream_notifier = UpstreamChangeNotifier::new();
+
+        let copilot_http = Arc::new(reqwest::Client::new());
+        let copilot_breaker = Arc::new(CopilotBreaker::new());
+        let copilot_pool = CopilotPool::new(
+            db.clone(),
+            copilot_breaker.clone(),
+            upstream_notifier.handle(),
+        );
+        let copilot_session = SessionTokenCache::with_client((*copilot_http).clone());
+
+        let anthropic_pool = AnthropicKeyPool::new(db.clone(), upstream_notifier.clone());
+        let anthropic_client = AnthropicUpstreamClient::new(
+            "https://api.anthropic.com",
+            std::time::Duration::from_secs(60),
+        )
+        .expect("anthropic client builds with default base");
+
         let state = AppState {
             cfg: Arc::new(cfg),
             db,
@@ -153,7 +176,13 @@ mod tests {
             limiter,
             snapshot,
             usage_writer,
-            upstream_notifier: UpstreamChangeNotifier::new(),
+            upstream_notifier,
+            copilot_breaker,
+            copilot_pool,
+            copilot_session,
+            copilot_http,
+            anthropic_pool,
+            anthropic_client,
         };
         super::build_admin_router(state.clone()).with_state(state)
     }
