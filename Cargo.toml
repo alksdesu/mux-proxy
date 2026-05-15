@@ -1,0 +1,98 @@
+[package]
+name = "mux-proxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[lib]
+name = "mux_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mux-proxy"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server / 路由
+axum = { version = "0.7", features = ["ws", "macros", "tokio"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"] }
+
+# HTTP 底层（Anthropic 渠道需要 preserve_header_case）
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "server"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "webpki-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+
+# PostgreSQL
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate", "chrono"] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# 字节操作
+bytes = "1"
+memchr = "2"
+regex = "1"
+flate2 = "1"
+base64 = "0.22"
+
+# 工具
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+
+# 并发原语
+dashmap = "6"
+parking_lot = "0.12"
+lru = "0.12"
+once_cell = "1"
+
+# 错误
+thiserror = "1"
+anyhow = "1"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "ansi"] }
+
+# 非 upstream HTTP 调用（Exa / GitHub token）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json", "stream"] }
+
+# Dashboard 静态资源内嵌
+rust-embed = { version = "8", features = ["interpolate-folder-path", "compression"] }
+mime_guess = "2"
+
+[dev-dependencies]
+wiremock = "0.6"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = "none"
+
+[profile.dev]
+opt-level = 0
+debug = true

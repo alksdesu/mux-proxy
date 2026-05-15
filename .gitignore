@@ -1,0 +1,60 @@
+# Rust
+/target
+**/target/
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+
+# sqlx offline metadata（敏感，DB schema 指纹）
+/.sqlx
+.sqlx-data.json
+
+# 配置 / 凭据
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+known_hosts
+authorized_keys
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude / agent 私有
+.claude/
+.claude-cache/
+CLAUDE.local.md
+
+# 本地脚本 / 临时
+/local/
+/private/
+/secrets/
+/scratch/
+/tmp/
+*.bak
+*.tmp
+*.log
+core.*
+
+# 抓包 / dump
+*.pcap
+*.har
+*.dmp
