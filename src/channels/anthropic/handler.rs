@@ -4,8 +4,9 @@
 //! ``Response.extensions``（含 hyper 私有 HeaderCaseMap）整体 forward 给共享 server。
 
 use crate::auth::KeyCacheEntry;
-use crate::billing::UsageWriter;
+use crate::billing::{ErrorLogRecord, UsageWriter};
 use crate::channels::anthropic::billing_hook::record_non_sse_usage;
+use crate::channels::ChannelKind;
 use crate::channels::anthropic::gzip_passthrough::{decompress_gzip, rewrite_gzip};
 use crate::channels::anthropic::header_case::canonicalize;
 use crate::channels::anthropic::key_pool::{KeyPool, classify_status, pool_empty_error};
@@ -108,35 +109,19 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
 
     let prepared_headers = build_response_headers(&resp_headers);
 
-    if !rewritten_marker {
-        return Ok(forward_body_as_is(
-            status,
-            prepared_headers,
-            resp_extensions,
-            body,
-        ));
-    }
-
-    let (current_model, original_model) = match (new_model, original_model) {
-        (Some(c), Some(o)) => (c, o),
-        _ => {
-            return Ok(forward_body_as_is(
-                status,
-                prepared_headers,
-                resp_extensions,
-                body,
-            ));
-        }
-    };
-
-    if is_sse && !is_gzip {
+    // SSE 路径走 sse_tee：spawn 后台 sniffer 旁路解析 message_start/message_delta usage
+    // 并落 BillingRecord，forward 走字节透传。sse_tee 当前需要 current/original_model
+    // 做 byte-splice，所以仅在 rewritten=true 时进入。
+    if is_sse && !is_gzip && rewritten_marker {
+        let current = new_model.clone().expect("rewritten implies new_model");
+        let original = original_model.clone().expect("rewritten implies original_model");
         return Ok(sse_tee_response(
             status,
             prepared_headers,
             resp_extensions,
             body,
-            current_model,
-            original_model,
+            current,
+            original,
             ctx.usage_writer,
             ctx.key_cache_entry.name.clone(),
             request_body_for_log,
@@ -145,6 +130,17 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         ));
     }
 
+    if is_sse && !rewritten_marker {
+        return Ok(forward_body_as_is(
+            status,
+            prepared_headers,
+            resp_extensions,
+            body,
+        ));
+    }
+
+    // Non-SSE：无论 rewritten 都 buffer + 计费/错误日志，再决定是否 splice。
+    // 计费语义是"用户消耗了多少 token"，与代理是否改字节无关。
     let buffered = match collect_with_cap(body, MAX_RESPONSE_BUFFER).await {
         Ok(b) => b,
         Err(CollectError::OverCap(stream_pass)) => {
@@ -160,39 +156,62 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         }
     };
 
-    if is_json && status.is_success() {
-        let plain_for_billing = if is_gzip {
-            decompress_gzip(&buffered)
-        } else {
-            Some(buffered.clone())
-        };
-        if let Some(plain) = plain_for_billing {
-            record_non_sse_usage(
-                &ctx.usage_writer,
-                &plain,
-                &ctx.key_cache_entry.name,
-                &original_model,
-                request_body_for_log,
-                ctx.client_ip.clone(),
-            );
+    let billing_model = original_model
+        .as_deref()
+        .unwrap_or("unknown")
+        .to_string();
+
+    match classify_billing_action(is_json, status, rewritten_marker) {
+        BillingAction::RecordUsage => {
+            let plain = if is_gzip { decompress_gzip(&buffered) } else { Some(buffered.clone()) };
+            if let Some(plain) = plain {
+                record_non_sse_usage(
+                    &ctx.usage_writer,
+                    &plain,
+                    &ctx.key_cache_entry.name,
+                    &billing_model,
+                    request_body_for_log.clone(),
+                    ctx.client_ip.clone(),
+                );
+            }
         }
+        BillingAction::RecordError => {
+            let plain = if is_gzip { decompress_gzip(&buffered) } else { Some(buffered.clone()) };
+            let response_body = plain
+                .as_deref()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
+            ctx.usage_writer.record_error(ErrorLogRecord {
+                channel: ChannelKind::Anthropic,
+                key_name: ctx.key_cache_entry.name.clone(),
+                status: status.as_u16(),
+                path: req.path.clone(),
+                model: billing_model.clone(),
+                request_body: request_body_for_log.clone(),
+                response_body,
+                ip: ctx.client_ip.clone().unwrap_or_default(),
+            });
+        }
+        BillingAction::Skip => {}
     }
 
     drop(ctx.concurrency_guard);
 
-    let rewritten = if is_gzip {
-        rewrite_gzip(buffered, &current_model, &original_model, is_sse)
-    } else if is_json {
-        rewrite_json_response(buffered, &current_model, &original_model)
-    } else {
-        buffered
+    let final_body = match (rewritten_marker, new_model, original_model) {
+        (true, Some(current), Some(original)) if is_gzip => {
+            rewrite_gzip(buffered, &current, &original, is_sse)
+        }
+        (true, Some(current), Some(original)) if is_json => {
+            rewrite_json_response(buffered, &current, &original)
+        }
+        _ => buffered,
     };
 
     Ok(forward_buffered(
         status,
         prepared_headers,
         resp_extensions,
-        rewritten,
+        final_body,
     ))
 }
 
@@ -328,6 +347,31 @@ fn sse_tee_response(
     assemble_response(status, headers, extensions, body)
 }
 
+/// 决定一条 non-SSE JSON 响应应该计 usage、记错误日志、还是不计费。
+/// 与 rewritten_marker 解耦——计费看 user → token 消耗，不看代理是否改字节。
+/// rewritten=false 也必须返回 RecordUsage 走 record_non_sse_usage。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BillingAction {
+    RecordUsage,
+    RecordError,
+    Skip,
+}
+
+pub(crate) fn classify_billing_action(
+    is_json: bool,
+    status: StatusCode,
+    _rewritten: bool,
+) -> BillingAction {
+    if !is_json {
+        return BillingAction::Skip;
+    }
+    if status.is_success() {
+        BillingAction::RecordUsage
+    } else {
+        BillingAction::RecordError
+    }
+}
+
 enum CollectError {
     OverCap(Bytes),
     Io(std::io::Error),
@@ -399,5 +443,49 @@ mod tests {
         let body = full_body(Bytes::from_static(b"x"));
         let resp = assemble_response(StatusCode::OK, vec![], ext, body);
         assert_eq!(resp.extensions().get::<Marker>(), Some(&Marker(7)));
+    }
+
+    #[test]
+    fn non_sse_records_usage_even_when_no_rewrite_rule_matches() {
+        // 同一 status / is_json，rewritten true 或 false 必须落 RecordUsage。
+        // 这条防退化锁死：trade-off A（rewritten=false 不计费）一旦回归就立即失败。
+        let with_rewrite = classify_billing_action(true, StatusCode::OK, true);
+        let without_rewrite = classify_billing_action(true, StatusCode::OK, false);
+        assert_eq!(with_rewrite, BillingAction::RecordUsage);
+        assert_eq!(without_rewrite, BillingAction::RecordUsage);
+    }
+
+    #[test]
+    fn classify_skips_non_json() {
+        assert_eq!(
+            classify_billing_action(false, StatusCode::OK, true),
+            BillingAction::Skip
+        );
+        assert_eq!(
+            classify_billing_action(false, StatusCode::INTERNAL_SERVER_ERROR, false),
+            BillingAction::Skip
+        );
+    }
+
+    #[test]
+    fn classify_error_status_records_error() {
+        for st in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert_eq!(
+                classify_billing_action(true, st, true),
+                BillingAction::RecordError,
+                "status={st:?}"
+            );
+            assert_eq!(
+                classify_billing_action(true, st, false),
+                BillingAction::RecordError,
+                "rewritten=false status={st:?}"
+            );
+        }
     }
 }
