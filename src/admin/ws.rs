@@ -133,7 +133,12 @@ pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::App
         .map(|(k, v)| (k.as_str().to_string(), v))
         .collect();
 
-    let empty_breaker: Vec<Value> = Vec::new();
+    let copilot_breaker = state.copilot_breaker.snapshot();
+    let breaker_by_channel = json!({
+        "copilot": copilot_breaker,
+        // Anthropic 渠道 breaker 在 KeyPool 内部，by-id snapshot 未暴露。
+        "anthropic": Vec::<Value>::new(),
+    });
 
     Ok(json!({
         "keys": snapshot_keys,
@@ -143,7 +148,8 @@ pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::App
             "copilot": totals_copilot,
             "anthropic": totals_anthropic,
         },
-        "breaker": empty_breaker,
+        "breaker": copilot_breaker,
+        "breaker_by_channel": breaker_by_channel,
         "snapshot_version": state.snapshot.current(),
     }))
 }

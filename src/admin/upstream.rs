@@ -1,6 +1,6 @@
 //! /admin/upstream CRUD + /admin/upstream/breaker。
 //! 写操作经 UpstreamChangeNotifier 通知 key_pool 强制刷新。
-//! breaker 接入由 P3 渠道层完成，本期端点仅做参数校验与桩响应。
+//! breaker 只接 Copilot 渠道；Anthropic 渠道熔断在 KeyPool 内部，未暴露 by-id API。
 
 use crate::admin::query::{parse_channel, parse_id_required};
 use crate::app::AppState;
@@ -101,12 +101,15 @@ pub async fn delete_handler(
 }
 
 pub async fn breaker_get_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> AppResult<axum::response::Response> {
-    let _ = parse_channel(params.get("channel").map(String::as_str))?;
-    let empty: Vec<serde_json::Value> = Vec::new();
-    Ok(Json(empty).into_response())
+    let channel = parse_channel(params.get("channel").map(String::as_str))?;
+    let snapshot = match channel {
+        None | Some(ChannelKind::Copilot) => state.copilot_breaker.snapshot(),
+        Some(ChannelKind::Anthropic) => Vec::new(),
+    };
+    Ok(Json(snapshot).into_response())
 }
 
 #[derive(Debug)]
@@ -142,13 +145,25 @@ pub async fn breaker_post_handler(
         .map(String::as_str)
         .ok_or_else(|| AppError::BadRequest("missing action".into()))?;
     let act = BreakerAction::parse(action)?;
-    let _upstream = db::upstream::find_by_id(&state.db, id)
+    let upstream = db::upstream::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    // Anthropic upstream id 不映射到 Copilot 的 breaker，直接 200 返回 noop 状态。
+    // 想真控 Anthropic 渠道熔断需要先给 anthropic::KeyPool 暴露 by-id API。
+    if upstream.channel_kind == ChannelKind::Copilot {
+        match act {
+            BreakerAction::Reset => state.copilot_breaker.reset(id),
+            BreakerAction::Disable => state.copilot_breaker.force_disable(id),
+        }
+        state.snapshot.bump();
+    }
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "action": act.as_str(),
-        "note": "pending breaker integration",
+        "channel": upstream.channel_kind.as_str(),
+        "applied": upstream.channel_kind == ChannelKind::Copilot,
     }))
     .into_response())
 }
