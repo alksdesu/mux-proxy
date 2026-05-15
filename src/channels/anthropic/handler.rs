@@ -11,7 +11,7 @@ use crate::channels::anthropic::gzip_passthrough::{decompress_gzip, rewrite_gzip
 use crate::channels::anthropic::header_case::canonicalize;
 use crate::channels::anthropic::key_pool::{KeyPool, classify_status, pool_empty_error};
 use crate::channels::anthropic::model_restore::rewrite_json_response;
-use crate::channels::anthropic::model_splice::{RewriteRule, rewrite_body};
+use crate::channels::anthropic::model_splice::{RewriteRule, extract_client_model, rewrite_body};
 use crate::channels::anthropic::request_strip::is_response_hop_by_hop;
 use crate::channels::anthropic::sse_tee::{
     ForwardSplitter, SniffContext, spawn_sniffer, try_send_to_sniffer,
@@ -63,11 +63,18 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let client_model = extract_client_model(&req.body, &content_type);
     let outcome = rewrite_body(req.body, &content_type, &ctx.rewrite_rules);
     let request_body_for_log = String::new();
     let rewritten_marker = outcome.rewritten();
     let original_model = outcome.original_model.clone();
     let new_model = outcome.new_model.clone();
+    // rewritten=true 时 original_model = 客户端 model；rewritten=false 时来自上面 extract。
+    // 永远拿得到客户端实际 model 名做计费兜底。
+    let billing_model_fallback = original_model
+        .clone()
+        .or_else(|| client_model.clone())
+        .unwrap_or_else(|| "unknown".to_string());
 
     let pooled = match ctx.key_pool.pick(&[]).await? {
         Some(k) => k,
@@ -109,33 +116,26 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
 
     let prepared_headers = build_response_headers(&resp_headers);
 
-    // SSE 路径走 sse_tee：spawn 后台 sniffer 旁路解析 message_start/message_delta usage
-    // 并落 BillingRecord，forward 走字节透传。sse_tee 当前需要 current/original_model
-    // 做 byte-splice，所以仅在 rewritten=true 时进入。
-    if is_sse && !is_gzip && rewritten_marker {
-        let current = new_model.clone().expect("rewritten implies new_model");
-        let original = original_model.clone().expect("rewritten implies original_model");
+    // SSE 路径无条件走 sse_tee：sniffer 段 always 抓 message_delta.usage 落 BillingRecord；
+    // splice 段按 rewritten 决定（None 时事件按字节透传不动）。计费与改字节解耦。
+    // gzip+SSE 极少见（Anthropic 默认 SSE 不带 gzip），暂走下面 buffered 路径兜底。
+    if is_sse && !is_gzip {
+        let splice = match (rewritten_marker, new_model.clone(), original_model.clone()) {
+            (true, Some(c), Some(o)) => Some((c, o)),
+            _ => None,
+        };
         return Ok(sse_tee_response(
             status,
             prepared_headers,
             resp_extensions,
             body,
-            current,
-            original,
+            splice,
             ctx.usage_writer,
             ctx.key_cache_entry.name.clone(),
+            billing_model_fallback.clone(),
             request_body_for_log,
             ctx.client_ip.clone(),
             ctx.concurrency_guard,
-        ));
-    }
-
-    if is_sse && !rewritten_marker {
-        return Ok(forward_body_as_is(
-            status,
-            prepared_headers,
-            resp_extensions,
-            body,
         ));
     }
 
@@ -156,10 +156,7 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         }
     };
 
-    let billing_model = original_model
-        .as_deref()
-        .unwrap_or("unknown")
-        .to_string();
+    let billing_model = billing_model_fallback.clone();
 
     match classify_billing_action(is_json, status, rewritten_marker) {
         BillingAction::RecordUsage => {
@@ -262,16 +259,6 @@ fn full_body(bytes: Bytes) -> ProxyBody {
     Full::new(bytes).map_err(|e| Box::new(e) as BoxError).boxed()
 }
 
-fn forward_body_as_is(
-    status: StatusCode,
-    headers: Vec<(HeaderName, HeaderValue)>,
-    extensions: Extensions,
-    body: hyper::body::Incoming,
-) -> ProxyResponse {
-    let boxed = body.map_err(|e| Box::new(e) as BoxError).boxed();
-    assemble_response(status, headers, extensions, boxed)
-}
-
 fn forward_buffered(
     status: StatusCode,
     headers: Vec<(HeaderName, HeaderValue)>,
@@ -299,24 +286,24 @@ fn sse_tee_response(
     headers: Vec<(HeaderName, HeaderValue)>,
     extensions: Extensions,
     upstream: hyper::body::Incoming,
-    current_model: String,
-    original_model: String,
+    splice: Option<(String, String)>,
     writer: UsageWriter,
     key_name: String,
+    billing_model_fallback: String,
     request_body: String,
     ip: Option<String>,
     guard: ConcurrencyGuard,
 ) -> ProxyResponse {
     let log_key_name = key_name.clone();
-    let log_model = original_model.clone();
+    let log_model = billing_model_fallback.clone();
     let (sniffer_tx, sniffer_handle) = spawn_sniffer(SniffContext {
         writer,
         key_name,
-        original_model: original_model.clone(),
+        original_model: billing_model_fallback,
         request_body,
         ip,
     });
-    let mut splitter = ForwardSplitter::new(current_model.clone(), original_model);
+    let mut splitter = ForwardSplitter::new(splice);
     let mut upstream = upstream;
     let body_stream = stream! {
         let _guard = guard;

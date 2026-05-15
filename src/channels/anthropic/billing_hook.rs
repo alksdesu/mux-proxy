@@ -166,6 +166,30 @@ impl SseUsageAggregator {
         Self::default()
     }
 
+    pub fn input_tokens(&self) -> u64 {
+        self.input_tokens
+    }
+
+    pub fn output_tokens(&self) -> u64 {
+        self.output_tokens
+    }
+
+    pub fn cache_creation_tokens(&self) -> u64 {
+        self.cache_creation_tokens
+    }
+
+    pub fn cache_read_tokens(&self) -> u64 {
+        self.cache_read_tokens
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub fn seen_message_start(&self) -> bool {
+        self.seen_message_start
+    }
+
     /// 处理一条 ``event: message_start`` 后跟随的 ``data: {...}``。
     pub fn ingest_message_start(&mut self, data: &[u8]) {
         let Ok(parsed) = serde_json::from_slice::<MessageStartPayload>(data) else {

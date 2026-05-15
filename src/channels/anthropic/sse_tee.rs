@@ -55,7 +55,7 @@ fn drain_complete_events(buf: &mut BytesMut, agg: &mut SseUsageAggregator) {
     }
 }
 
-fn scan_event(event: &[u8], agg: &mut SseUsageAggregator) {
+pub(crate) fn scan_event(event: &[u8], agg: &mut SseUsageAggregator) {
     let mut event_type: Option<&[u8]> = None;
     let mut data_lines: Vec<&[u8]> = Vec::new();
     for line in event.split(|b| *b == b'\n') {
@@ -104,23 +104,35 @@ fn trim_ascii(s: &[u8]) -> &[u8] {
     &s[start..end]
 }
 
-/// 转发方向：累 buf 拆事件，每事件走 ``rewrite_sse_blob`` 改 model。
-/// 尾巴未结束的事件保留在 buf 里，等下个 chunk 拼接。
+/// 转发方向：累 buf 拆事件，splice 段可选。``None`` 时事件直接 forward 不动字节，
+/// sniffer 段仍照常跑（计费与 splice 解耦）。
 pub struct ForwardSplitter {
     buf: BytesMut,
-    current_model: String,
-    original_model: String,
-    splice_enabled: bool,
+    splice: Option<SpliceModels>,
+}
+
+struct SpliceModels {
+    current: String,
+    original: String,
 }
 
 impl ForwardSplitter {
-    pub fn new(current_model: String, original_model: String) -> Self {
-        let splice_enabled = current_model != original_model;
+    /// rewritten=true 路径传 ``Some((current, original))``；
+    /// rewritten=false 路径传 ``None``，事件按字节透传 sniffer 仍计费。
+    pub fn new(splice: Option<(String, String)>) -> Self {
+        let splice = splice.and_then(|(c, o)| {
+            if c == o {
+                None
+            } else {
+                Some(SpliceModels {
+                    current: c,
+                    original: o,
+                })
+            }
+        });
         Self {
             buf: BytesMut::with_capacity(8 * 1024),
-            current_model,
-            original_model,
-            splice_enabled,
+            splice,
         }
     }
 
@@ -148,10 +160,10 @@ impl ForwardSplitter {
     }
 
     fn apply_splice(&self, data: Bytes) -> Bytes {
-        if !self.splice_enabled {
-            return data;
+        match &self.splice {
+            None => data,
+            Some(m) => rewrite_sse_blob(data, &m.current, &m.original),
         }
-        rewrite_sse_blob(data, &self.current_model, &self.original_model)
     }
 }
 
@@ -179,7 +191,7 @@ mod tests {
 
     #[test]
     fn splitter_emits_complete_events_only() {
-        let mut sp = ForwardSplitter::new("jup".into(), "jup".into());
+        let mut sp = ForwardSplitter::new(None);
         let out = sp.ingest_chunk(Bytes::from_static(b"event: x\ndata: 1\n\nevent: y"));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].as_ref(), b"event: x\ndata: 1\n\n");
@@ -190,7 +202,8 @@ mod tests {
 
     #[test]
     fn splitter_applies_model_restore() {
-        let mut sp = ForwardSplitter::new("jup-v1".into(), "claude-opus-4-7".into());
+        let mut sp =
+            ForwardSplitter::new(Some(("jup-v1".into(), "claude-opus-4-7".into())));
         let chunk = Bytes::from_static(
             b"event: message_start\ndata: {\"message\":{\"model\":\"jup-v1\"}}\n\n",
         );
@@ -202,7 +215,7 @@ mod tests {
 
     #[test]
     fn splitter_handles_crlf_delim() {
-        let mut sp = ForwardSplitter::new("a".into(), "a".into());
+        let mut sp = ForwardSplitter::new(None);
         let out = sp.ingest_chunk(Bytes::from_static(
             b"event: x\r\ndata: 1\r\n\r\nevent: y\r\ndata: 2\r\n\r\n",
         ));
@@ -211,7 +224,7 @@ mod tests {
 
     #[test]
     fn splitter_flush_emits_leftover() {
-        let mut sp = ForwardSplitter::new("a".into(), "a".into());
+        let mut sp = ForwardSplitter::new(None);
         let _ = sp.ingest_chunk(Bytes::from_static(b"event: x\ndata: incomplete"));
         let leftover = sp.flush().unwrap();
         assert_eq!(leftover.as_ref(), b"event: x\ndata: incomplete");
@@ -247,7 +260,8 @@ mod tests {
 
     #[test]
     fn splitter_chunked_across_model_field() {
-        let mut sp = ForwardSplitter::new("jup-v1".into(), "claude-opus-4-7".into());
+        let mut sp =
+            ForwardSplitter::new(Some(("jup-v1".into(), "claude-opus-4-7".into())));
         let prefix = Bytes::from_static(b"event: message_start\ndata: {\"message\":{\"mod");
         let suffix = Bytes::from_static(b"el\":\"jup-v1\"}}\n\n");
         let out1 = sp.ingest_chunk(prefix);
@@ -256,5 +270,59 @@ mod tests {
         assert_eq!(out2.len(), 1);
         let s = std::str::from_utf8(out2[0].as_ref()).unwrap();
         assert!(s.contains(r#""model":"claude-opus-4-7""#));
+    }
+
+    #[test]
+    fn splitter_no_splice_passes_bytes_through() {
+        // rewritten=false 时 ForwardSplitter::new(None)。模拟一段含 model 的事件，
+        // 字节必须原样转发，sniffer 那边照常拿到 message_delta.usage 计费。
+        // 此测试锁死"SSE rewritten=false 仍走 sse_tee + 字节透传"行为。
+        let mut sp = ForwardSplitter::new(None);
+        let chunk = Bytes::from_static(
+            b"event: message_start\ndata: {\"message\":{\"model\":\"claude-haiku\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        );
+        let out = sp.ingest_chunk(chunk.clone());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].as_ref(), chunk.as_ref(), "no splice → byte-for-byte forward");
+    }
+
+    #[test]
+    fn splitter_equal_models_disable_splice() {
+        // Some((c, c)) 也应禁用 splice（c == o 没必要改字节）。
+        let mut sp = ForwardSplitter::new(Some(("same".into(), "same".into())));
+        let chunk = Bytes::from_static(b"event: x\ndata: {\"model\":\"same\"}\n\n");
+        let out = sp.ingest_chunk(chunk.clone());
+        assert_eq!(out[0].as_ref(), chunk.as_ref());
+    }
+
+    #[test]
+    fn sse_records_usage_even_when_no_rewrite_rule_matches() {
+        // 模拟 handler SSE 路径在 rewrite_rules 空 / 没命中规则时的等价情况：
+        // ForwardSplitter::new(None) + sniffer 路径独立运行。
+        // 把一段完整 SSE 流喂给 scan_event，断言 SseUsageAggregator 提到 usage——
+        // 即响应转发完后 agg.finalize 会落一条 BillingRecord。
+        let mut agg = SseUsageAggregator::new();
+        let stream = b"event: message_start\n\
+                       data: {\"message\":{\"model\":\"claude-haiku\",\"usage\":{\"input_tokens\":42,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3}}}\n\n\
+                       event: content_block_delta\n\
+                       data: {\"type\":\"text_delta\",\"text\":\"hi\"}\n\n\
+                       event: message_delta\n\
+                       data: {\"usage\":{\"output_tokens\":17}}\n\n";
+        let mut buf = BytesMut::from(&stream[..]);
+        drain_complete_events(&mut buf, &mut agg);
+
+        assert!(agg.seen_message_start(), "must see message_start regardless of splice");
+        assert_eq!(agg.input_tokens(), 42);
+        assert_eq!(agg.cache_creation_tokens(), 5);
+        assert_eq!(agg.cache_read_tokens(), 3);
+        assert_eq!(agg.output_tokens(), 17);
+        assert_eq!(agg.model(), Some("claude-haiku"));
+
+        // 同时验证 ForwardSplitter::new(None) 不动字节——sniffer 和 splice 两路独立。
+        let mut sp = ForwardSplitter::new(None);
+        let out = sp.ingest_chunk(Bytes::from_static(stream));
+        assert_eq!(out.len(), 3, "3 SSE events parsed");
+        let total: usize = out.iter().map(|b| b.len()).sum();
+        assert_eq!(total, stream.len(), "byte-for-byte forward");
     }
 }

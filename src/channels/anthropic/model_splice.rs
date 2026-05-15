@@ -81,6 +81,20 @@ impl RewriteOutcome {
 static MODEL_FIELD: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"("model"\s*:\s*")([^"]+)(")"#).expect("MODEL_FIELD compiles"));
 
+/// 单纯从请求体里抽出 ``"model"`` 字段的值，不做改写。给计费兜底用：
+/// 即使 rewritten=false（没命中任何 rule），handler 也能拿到客户端 model 名喂给 SniffContext。
+pub fn extract_client_model(body: &[u8], content_type: &str) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    if !content_type.to_ascii_lowercase().contains("application/json") {
+        return None;
+    }
+    let caps = MODEL_FIELD.captures(body)?;
+    let value_match = caps.get(2)?;
+    std::str::from_utf8(value_match.as_bytes()).ok().map(String::from)
+}
+
 /// 检查请求体里第一处 ``"model": "X"`` 是否命中改写规则，若命中替换 X 为 target。
 /// 非 JSON content-type、空 body、无规则、UTF-8 解码失败、target==original 都走原样透传。
 pub fn rewrite_body(body: Bytes, content_type: &str, rules: &[RewriteRule]) -> RewriteOutcome {
