@@ -58,3 +58,6 @@ core.*
 *.pcap
 *.har
 *.dmp
+
+# Worktree 间路标文档（仅本地参考用，不进主干）
+_handover_*.md

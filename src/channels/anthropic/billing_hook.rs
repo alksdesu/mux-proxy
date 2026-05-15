@@ -5,6 +5,10 @@
 use crate::billing::{BillingRecord, UsageWriter};
 use crate::channels::ChannelKind;
 use serde::Deserialize;
+use tracing::warn;
+
+/// non-SSE JSON 响应体 parse 上限。超过这个值不解析以省内存，走 fallback 0 tokens 计费。
+pub const NON_SSE_PARSE_LIMIT: usize = 1024 * 1024;
 
 /// 一次 SSE 流的 usage 累计状态。``input_tokens / cache_*`` 在 ``message_start`` 一次给齐，
 /// ``output_tokens`` 在 ``message_delta`` 给。``finalize`` 时合成 BillingRecord 落账。
@@ -48,6 +52,113 @@ struct MessageStartMessage {
 struct MessageDeltaPayload {
     #[serde(default)]
     usage: Option<UsageJson>,
+}
+
+/// non-SSE 一次性响应体 schema（``POST /v1/messages`` stream=false）。
+/// 顶层 ``model`` + ``usage`` 直接给齐，不需要 message_start/delta 拼接。
+#[derive(Debug, Deserialize)]
+struct NonStreamingResponse {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<UsageJson>,
+}
+
+/// 纯函数版本：parse 出 BillingRecord 字段值，写入由 caller 决定。
+/// 体超过 ``NON_SSE_PARSE_LIMIT`` 跳过 parse；parse 失败也走 0 tokens 路径。
+/// 返回的 ``model`` 永远非空（不命中时用 original_model 兜底）。
+pub fn parse_non_sse_billing(
+    plain: &[u8],
+    key_name: &str,
+    original_model: &str,
+) -> NonSseBilling {
+    if plain.len() > NON_SSE_PARSE_LIMIT {
+        warn!(
+            key_name = %key_name,
+            size = plain.len(),
+            "non-SSE response exceeds parse limit, billing with 0 tokens"
+        );
+        return NonSseBilling::fallback(original_model);
+    }
+    match serde_json::from_slice::<NonStreamingResponse>(plain) {
+        Ok(parsed) => {
+            let usage = parsed.usage.unwrap_or_default();
+            NonSseBilling {
+                model: parsed.model.unwrap_or_else(|| original_model.to_string()),
+                input_tokens: usage.input_tokens.unwrap_or(0),
+                output_tokens: usage.output_tokens.unwrap_or(0),
+                cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
+                cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                fallback: false,
+            }
+        }
+        Err(e) => {
+            warn!(
+                key_name = %key_name,
+                error = ?e,
+                "non-SSE response parse failed, billing with 0 tokens"
+            );
+            NonSseBilling::fallback(original_model)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonSseBilling {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// 是否走了 fallback（超限或 parse 失败）。仅供日志/单测断言用。
+    pub fallback: bool,
+}
+
+impl NonSseBilling {
+    fn fallback(original_model: &str) -> Self {
+        Self {
+            model: original_model.to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            fallback: true,
+        }
+    }
+}
+
+/// non-SSE JSON 响应一次性 parse usage 并写入 UsageWriter。
+pub fn record_non_sse_usage(
+    writer: &UsageWriter,
+    plain: &[u8],
+    key_name: &str,
+    original_model: &str,
+    request_body: String,
+    ip: Option<String>,
+) {
+    let billing = parse_non_sse_billing(plain, key_name, original_model);
+    writer.record(BillingRecord {
+        channel: ChannelKind::Anthropic,
+        model: billing.model,
+        key_name: key_name.to_string(),
+        input_tokens: billing.input_tokens,
+        output_tokens: billing.output_tokens,
+        cache_creation_tokens: billing.cache_creation_tokens,
+        cache_read_tokens: billing.cache_read_tokens,
+        request_body,
+        ip,
+    });
+}
+
+impl Default for UsageJson {
+    fn default() -> Self {
+        Self {
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
 }
 
 impl SseUsageAggregator {
@@ -175,5 +286,47 @@ mod tests {
         agg.ingest_message_delta(br#"{"usage":{"input_tokens":1,"output_tokens":2}}"#);
         assert_eq!(agg.input_tokens, 100);
         assert_eq!(agg.output_tokens, 2);
+    }
+
+    #[test]
+    fn non_sse_json_records_usage() {
+        let body = br#"{"id":"msg_x","model":"claude-jupiter-v1-p","usage":{"input_tokens":42,"output_tokens":17,"cache_creation_input_tokens":5,"cache_read_input_tokens":3}}"#;
+        let billing = parse_non_sse_billing(body, "test-key", "claude-opus-4-7");
+        assert!(!billing.fallback);
+        assert_eq!(billing.model, "claude-jupiter-v1-p");
+        assert_eq!(billing.input_tokens, 42);
+        assert_eq!(billing.output_tokens, 17);
+        assert_eq!(billing.cache_creation_tokens, 5);
+        assert_eq!(billing.cache_read_tokens, 3);
+    }
+
+    #[test]
+    fn non_sse_malformed_skips_billing_silently() {
+        let billing = parse_non_sse_billing(b"not json", "test-key", "claude-opus-4-7");
+        assert!(billing.fallback);
+        assert_eq!(billing.model, "claude-opus-4-7");
+        assert_eq!(billing.input_tokens, 0);
+        assert_eq!(billing.output_tokens, 0);
+    }
+
+    #[test]
+    fn non_sse_oversized_falls_back_to_zero_tokens() {
+        let mut blob = b"{\"model\":\"m\",\"usage\":{\"input_tokens\":99},\"padding\":\"".to_vec();
+        blob.extend(std::iter::repeat(b'A').take(NON_SSE_PARSE_LIMIT + 1));
+        blob.extend_from_slice(b"\"}");
+        let billing = parse_non_sse_billing(&blob, "test-key", "orig");
+        assert!(billing.fallback);
+        assert_eq!(billing.model, "orig");
+        assert_eq!(billing.input_tokens, 0);
+    }
+
+    #[test]
+    fn non_sse_missing_usage_fields_default_zero() {
+        let body = br#"{"model":"x","usage":{}}"#;
+        let billing = parse_non_sse_billing(body, "k", "orig");
+        assert!(!billing.fallback);
+        assert_eq!(billing.model, "x");
+        assert_eq!(billing.input_tokens, 0);
+        assert_eq!(billing.output_tokens, 0);
     }
 }

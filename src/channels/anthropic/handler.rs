@@ -5,7 +5,8 @@
 
 use crate::auth::KeyCacheEntry;
 use crate::billing::UsageWriter;
-use crate::channels::anthropic::gzip_passthrough::rewrite_gzip;
+use crate::channels::anthropic::billing_hook::record_non_sse_usage;
+use crate::channels::anthropic::gzip_passthrough::{decompress_gzip, rewrite_gzip};
 use crate::channels::anthropic::header_case::canonicalize;
 use crate::channels::anthropic::key_pool::{KeyPool, classify_status, pool_empty_error};
 use crate::channels::anthropic::model_restore::rewrite_json_response;
@@ -159,6 +160,24 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         }
     };
 
+    if is_json && status.is_success() {
+        let plain_for_billing = if is_gzip {
+            decompress_gzip(&buffered)
+        } else {
+            Some(buffered.clone())
+        };
+        if let Some(plain) = plain_for_billing {
+            record_non_sse_usage(
+                &ctx.usage_writer,
+                &plain,
+                &ctx.key_cache_entry.name,
+                &original_model,
+                request_body_for_log,
+                ctx.client_ip.clone(),
+            );
+        }
+    }
+
     drop(ctx.concurrency_guard);
 
     let rewritten = if is_gzip {
@@ -269,6 +288,8 @@ fn sse_tee_response(
     ip: Option<String>,
     guard: ConcurrencyGuard,
 ) -> ProxyResponse {
+    let log_key_name = key_name.clone();
+    let log_model = original_model.clone();
     let (sniffer_tx, sniffer_handle) = spawn_sniffer(SniffContext {
         writer,
         key_name,
@@ -285,7 +306,7 @@ fn sse_tee_response(
             match upstream.frame().await {
                 Some(Ok(frame)) => {
                     if let Ok(data) = frame.into_data() {
-                        try_send_to_sniffer(&sniffer_tx, data.clone());
+                        try_send_to_sniffer(&sniffer_tx, data.clone(), &log_key_name, &log_model);
                         for ev in splitter.ingest_chunk(data) {
                             yield Ok::<Frame<Bytes>, BoxError>(Frame::data(ev));
                         }

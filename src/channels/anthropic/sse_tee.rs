@@ -7,7 +7,7 @@ use crate::channels::anthropic::billing_hook::SseUsageAggregator;
 use crate::channels::anthropic::model_restore::{find_event_boundary, rewrite_sse_blob};
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::error;
 
 pub const SNIFF_CHANNEL_CAPACITY: usize = 32;
 
@@ -155,10 +155,21 @@ impl ForwardSplitter {
     }
 }
 
-/// 给 forward stream 推一个 chunk 给 sniffer。channel 满 → drop（丢账不丢响应），日志记一条。
-pub fn try_send_to_sniffer(tx: &mpsc::Sender<Bytes>, chunk: Bytes) {
+/// 给 forward stream 推一个 chunk 给 sniffer。channel 满 → drop（丢账不丢响应）。
+/// 用 ``error!`` 级别记，因为这是财务损失，prometheus 抓 alarm 用。
+pub fn try_send_to_sniffer(
+    tx: &mpsc::Sender<Bytes>,
+    chunk: Bytes,
+    key_name: &str,
+    model: &str,
+) {
     if let Err(e) = tx.try_send(chunk) {
-        debug!(error = ?e, "sse sniffer dropped chunk (capacity reached)");
+        error!(
+            key_name = %key_name,
+            model = %model,
+            error = ?e,
+            "billing record dropped: sniffer mpsc full"
+        );
     }
 }
 

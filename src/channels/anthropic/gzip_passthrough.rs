@@ -10,6 +10,17 @@ use std::io::{Read, Write};
 
 const COMPRESSION_LEVEL: u32 = 6;
 
+/// 单纯解压拿明文。畸形 gzip → None。计费层用这个先 sniff 明文 usage，
+/// 拿不到时由 caller 决定走 fallback；rewrite_gzip 内部不复用此函数（保持各自失败兜底逻辑独立）。
+pub fn decompress_gzip(raw: &[u8]) -> Option<Bytes> {
+    let mut decoder = GzDecoder::new(raw);
+    let mut plain = Vec::with_capacity(raw.len() * 4);
+    if decoder.read_to_end(&mut plain).is_err() {
+        return None;
+    }
+    Some(Bytes::from(plain))
+}
+
 /// is_sse=true 走 SSE blob 改写，否则走 JSON 改写。两者目前底层同一条 regex，
 /// 拆开是为未来 SSE 行级解析留接口。
 pub fn rewrite_gzip(
@@ -106,6 +117,19 @@ mod tests {
         let restored = gunzip(&out);
         let s = std::str::from_utf8(&restored).unwrap();
         assert!(s.contains(r#""model":"claude-opus-4-7""#));
+    }
+
+    #[test]
+    fn decompress_gzip_roundtrip() {
+        let plain = br#"{"usage":{"input_tokens":12}}"#;
+        let gz = gzip(plain);
+        let out = decompress_gzip(&gz).expect("valid gzip");
+        assert_eq!(out.as_ref(), plain.as_slice());
+    }
+
+    #[test]
+    fn decompress_gzip_malformed_returns_none() {
+        assert!(decompress_gzip(b"not gzip").is_none());
     }
 
     #[test]
