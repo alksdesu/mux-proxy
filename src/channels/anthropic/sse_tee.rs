@@ -9,6 +9,8 @@ use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc;
 use tracing::error;
 
+/// 典型 Anthropic SSE 流 50-100 chunks/s，sniffer 行扫描 + serde_json::from_slice μs 级；
+/// 32 容量留约 300ms backlog 应付临时 GC pause / 调度抖动。满时 try_send 丢账不丢响应。
 pub const SNIFF_CHANNEL_CAPACITY: usize = 32;
 
 /// 旁路给 sniffer task 用的上下文。``request_body`` 已被 splice 改写过，

@@ -6,6 +6,7 @@ use dashmap::DashMap;
 use memchr::memmem;
 use once_cell::sync::Lazy;
 use regex::bytes::Regex;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 static RESTORE_CACHE: Lazy<DashMap<String, Arc<Regex>>> = Lazy::new(DashMap::new);
@@ -25,7 +26,8 @@ fn restore_regex(current_model: &str) -> Arc<Regex> {
     compiled
 }
 
-/// 整段 JSON 体的还原。``current==original`` 时直接返原 body。
+/// 整段 JSON 体的还原。``current==original`` 或无匹配时返原 body 共享底层 buffer；
+/// 仅在真有替换发生（Cow::Owned）时把新 Vec 转 Bytes。
 pub fn rewrite_json_response(
     body: Bytes,
     current_model: &str,
@@ -45,7 +47,10 @@ pub fn rewrite_json_response(
         buf.extend_from_slice(&caps[2]);
         buf
     });
-    Bytes::copy_from_slice(replaced.as_ref())
+    match replaced {
+        Cow::Borrowed(_) => body,
+        Cow::Owned(v) => Bytes::from(v),
+    }
 }
 
 /// SSE blob 的还原。一个 blob 可能包含多个事件，但所有事件都按 ``"model":"X"``
@@ -118,6 +123,16 @@ mod tests {
         let out = rewrite_json_response(body, "a+b/c=d", "orig");
         let s = std::str::from_utf8(&out).unwrap();
         assert_eq!(s, r#"{"model":"orig"}"#);
+    }
+
+    #[test]
+    fn no_match_returns_original_buffer_without_copy() {
+        // current 与 body 里的 model 不匹配 → regex 返 Cow::Borrowed → 必须复用原 Bytes 不拷贝
+        let body = Bytes::from_static(br#"{"model":"claude-haiku","x":1}"#);
+        let body_ptr = body.as_ptr();
+        let out = rewrite_json_response(body.clone(), "not-in-body", "ignored");
+        assert_eq!(out.as_ref(), body.as_ref());
+        assert_eq!(out.as_ptr(), body_ptr, "no-match path must reuse the original buffer");
     }
 
     #[test]

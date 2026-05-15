@@ -1,5 +1,5 @@
-//! 零拷贝字节 splice。响应清洗时需要在 JSON / SSE 字节流里
-//! 替换 model 名等小段内容，避免反复整体 to_vec 后再拼接。
+//! 预分配单次 splice。响应清洗时需要在 JSON / SSE 字节流里替换 model 名等
+//! 小段内容；按总长度一次性分配 BytesMut，三段 put_slice 单次写入，避免反复 to_vec 拼接。
 
 use bytes::{BufMut, Bytes, BytesMut};
 use std::ops::Range;

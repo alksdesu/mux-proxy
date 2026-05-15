@@ -166,26 +166,32 @@ impl SseUsageAggregator {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn input_tokens(&self) -> u64 {
         self.input_tokens
     }
 
+    #[cfg(test)]
     pub fn output_tokens(&self) -> u64 {
         self.output_tokens
     }
 
+    #[cfg(test)]
     pub fn cache_creation_tokens(&self) -> u64 {
         self.cache_creation_tokens
     }
 
+    #[cfg(test)]
     pub fn cache_read_tokens(&self) -> u64 {
         self.cache_read_tokens
     }
 
+    #[cfg(test)]
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
 
+    #[cfg(test)]
     pub fn seen_message_start(&self) -> bool {
         self.seen_message_start
     }

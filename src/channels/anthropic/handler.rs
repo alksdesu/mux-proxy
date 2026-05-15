@@ -26,6 +26,7 @@ use http_body::Frame;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use std::sync::Arc;
+use tracing::warn;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
@@ -141,6 +142,14 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
 
     // Non-SSE：无论 rewritten 都 buffer + 计费/错误日志，再决定是否 splice。
     // 计费语义是"用户消耗了多少 token"，与代理是否改字节无关。
+    // gzip+SSE 落到本分支：sse_tee 拿不到行级 usage（buffered 后只能整体 parse JSON）。
+    // Anthropic 实测不返 gzip+SSE，触发即可观测异常上游配置。
+    if is_sse && is_gzip {
+        warn!(
+            key = %ctx.key_cache_entry.name,
+            "upstream returned SSE+gzip; sse_tee billing path skipped, falling back to buffered no-bill"
+        );
+    }
     let buffered = match collect_with_cap(body, MAX_RESPONSE_BUFFER).await {
         Ok(b) => b,
         Err(CollectError::OverCap(stream_pass)) => {
@@ -158,6 +167,9 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
 
     let billing_model = billing_model_fallback.clone();
 
+    // gzip 路径明文需要解压一次给计费 parse；下面 rewrite_gzip 还会独立再解一次自己做改写。
+    // 解开放在不同模块各自维护失败兜底逻辑（rewrite_gzip 内部畸形 gzip 返原 raw，
+    // 这里 decompress_gzip 失败时 caller 直接走 fallback），双重解压代价 < 100KB 响应 < 1ms。
     match classify_billing_action(is_json, status, rewritten_marker) {
         BillingAction::RecordUsage => {
             let plain = if is_gzip { decompress_gzip(&buffered) } else { Some(buffered.clone()) };

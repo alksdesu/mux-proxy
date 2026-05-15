@@ -23,12 +23,17 @@ pub fn decompress_gzip(raw: &[u8]) -> Option<Bytes> {
 
 /// is_sse=true 走 SSE blob 改写，否则走 JSON 改写。两者目前底层同一条 regex，
 /// 拆开是为未来 SSE 行级解析留接口。
+/// current_model 与 original_model 相等时直接返原 raw——防御 flate2/hyper-rustls
+/// 升级时 decompress→recompress 往返产生字节级微差。
 pub fn rewrite_gzip(
     raw: Bytes,
     current_model: &str,
     original_model: &str,
     is_sse: bool,
 ) -> Bytes {
+    if current_model == original_model {
+        return raw;
+    }
     let mut decoder = GzDecoder::new(&raw[..]);
     let mut plain = Vec::with_capacity(raw.len() * 4);
     if decoder.read_to_end(&mut plain).is_err() {
@@ -140,5 +145,17 @@ mod tests {
         let out1 = rewrite_gzip(gz1.clone(), "foo", "foo", false);
         let out2 = rewrite_gzip(gz1, "foo", "foo", false);
         assert_eq!(out1, out2, "level=6 output must be deterministic");
+    }
+
+    #[test]
+    fn rewrite_gzip_skips_when_models_equal() {
+        // current == original 必须返原 raw，不走 decompress/recompress 往返。
+        // 这条防御 flate2 / hyper-rustls 升级产生字节级微差导致客户端抓包识别 proxy。
+        let plain = br#"{"model":"same"}"#;
+        let gz = Bytes::from(gzip(plain));
+        let gz_ptr = gz.as_ptr();
+        let out = rewrite_gzip(gz.clone(), "same", "same", false);
+        assert_eq!(out.as_ref(), gz.as_ref());
+        assert_eq!(out.as_ptr(), gz_ptr, "equal-models path must reuse the original buffer");
     }
 }
