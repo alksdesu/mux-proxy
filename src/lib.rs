@@ -7,7 +7,6 @@ pub mod admin;
 pub mod app;
 pub mod auth;
 pub mod billing;
-pub mod breaker;
 pub mod channels;
 pub mod concurrency;
 pub mod config;

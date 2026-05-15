@@ -1,5 +1,4 @@
-//! /stats 全局聚合 + /stats/reset。返回结构按渠道分桶，
-//! 兼容旧 dashboard 的 totalRequests / totalErrors / byModel / byKey 顶层字段。
+//! /stats 全局聚合 + /stats/reset。结构纯 snake_case，按渠道分桶。
 
 use crate::admin::query::parse_channel;
 use crate::app::AppState;
@@ -119,23 +118,23 @@ async fn collect(state: &AppState, channel_filter: Option<ChannelKind>) -> AppRe
         let bucket = by_model.entry(model).or_insert_with(|| {
             json!({
                 "requests": 0_i64,
-                "inputTokens": 0_i64,
-                "outputTokens": 0_i64,
-                "cacheCreationTokens": 0_i64,
-                "cacheReadTokens": 0_i64,
-                "cost": 0.0_f64,
-                "cacheSaved": 0.0_f64,
+                "input_tokens": 0_i64,
+                "output_tokens": 0_i64,
+                "cache_creation_tokens": 0_i64,
+                "cache_read_tokens": 0_i64,
+                "cost_usd": 0.0_f64,
+                "cache_saved_usd": 0.0_f64,
                 "channels": [],
             })
         });
         let obj = bucket.as_object_mut().expect("entry is object");
         bump_i64(obj, "requests", requests);
-        bump_i64(obj, "inputTokens", inp);
-        bump_i64(obj, "outputTokens", outp);
-        bump_i64(obj, "cacheCreationTokens", cw);
-        bump_i64(obj, "cacheReadTokens", cr);
-        bump_f64(obj, "cost", cost);
-        bump_f64(obj, "cacheSaved", cache_saved);
+        bump_i64(obj, "input_tokens", inp);
+        bump_i64(obj, "output_tokens", outp);
+        bump_i64(obj, "cache_creation_tokens", cw);
+        bump_i64(obj, "cache_read_tokens", cr);
+        bump_f64(obj, "cost_usd", cost);
+        bump_f64(obj, "cache_saved_usd", cache_saved);
         if let Some(channels_arr) = obj.get_mut("channels").and_then(|v| v.as_array_mut()) {
             let token = json!(ch.as_str());
             if !channels_arr.iter().any(|v| v == &token) {
@@ -184,21 +183,20 @@ async fn collect(state: &AppState, channel_filter: Option<ChannelKind>) -> AppRe
         let bucket = by_key.entry(key_name).or_insert_with(|| {
             json!({
                 "requests": 0_i64,
-                "inputTokens": 0_i64,
-                "outputTokens": 0_i64,
-                "cacheCreationTokens": 0_i64,
-                "cacheReadTokens": 0_i64,
-                "cost": 0.0_f64,
-                "cacheSaved": 0.0_f64,
+                "input_tokens": 0_i64,
+                "output_tokens": 0_i64,
+                "cache_creation_tokens": 0_i64,
+                "cache_read_tokens": 0_i64,
+                "cost_usd": 0.0_f64,
             })
         });
         let obj = bucket.as_object_mut().expect("entry is object");
         bump_i64(obj, "requests", row.try_get("requests")?);
-        bump_i64(obj, "inputTokens", row.try_get("input_tokens")?);
-        bump_i64(obj, "outputTokens", row.try_get("output_tokens")?);
-        bump_i64(obj, "cacheCreationTokens", row.try_get("cache_creation_tokens")?);
-        bump_i64(obj, "cacheReadTokens", row.try_get("cache_read_tokens")?);
-        bump_f64(obj, "cost", row.try_get("cost_usd")?);
+        bump_i64(obj, "input_tokens", row.try_get("input_tokens")?);
+        bump_i64(obj, "output_tokens", row.try_get("output_tokens")?);
+        bump_i64(obj, "cache_creation_tokens", row.try_get("cache_creation_tokens")?);
+        bump_i64(obj, "cache_read_tokens", row.try_get("cache_read_tokens")?);
+        bump_f64(obj, "cost_usd", row.try_get("cost_usd")?);
     }
 
     let active_keys: i64 = db::keys::count(&state.db, channel_filter).await?;
@@ -227,13 +225,13 @@ async fn collect(state: &AppState, channel_filter: Option<ChannelKind>) -> AppRe
         recent.push(json!({
             "time": row.try_get::<String, _>("time")?,
             "model": row.try_get::<String, _>("model")?,
-            "key": row.try_get::<String, _>("key_name")?,
-            "channel": ch.as_str(),
-            "inputTokens": row.try_get::<i64, _>("input_tokens")?,
-            "outputTokens": row.try_get::<i64, _>("output_tokens")?,
-            "cacheCreationTokens": row.try_get::<i64, _>("cache_creation_tokens")?,
-            "cacheReadTokens": row.try_get::<i64, _>("cache_read_tokens")?,
-            "cost": format!("${:.6}", row.try_get::<f64, _>("cost_usd")?),
+            "key_name": row.try_get::<String, _>("key_name")?,
+            "channel_kind": ch.as_str(),
+            "input_tokens": row.try_get::<i64, _>("input_tokens")?,
+            "output_tokens": row.try_get::<i64, _>("output_tokens")?,
+            "cache_creation_tokens": row.try_get::<i64, _>("cache_creation_tokens")?,
+            "cache_read_tokens": row.try_get::<i64, _>("cache_read_tokens")?,
+            "cost_usd": row.try_get::<f64, _>("cost_usd")?,
         }));
     }
 
@@ -243,23 +241,23 @@ async fn collect(state: &AppState, channel_filter: Option<ChannelKind>) -> AppRe
         .collect();
 
     Ok(json!({
-        "totalRequests": totals_all.total_requests,
-        "totalErrors": totals_all.total_errors,
-        "totalInputTokens": total_input,
-        "totalOutputTokens": total_output,
-        "totalCacheCreationTokens": total_cache_w,
-        "totalCacheReadTokens": total_cache_r,
-        "activeKeys": active_keys,
+        "total_requests": totals_all.total_requests,
+        "total_errors": totals_all.total_errors,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "total_cache_creation_tokens": total_cache_w,
+        "total_cache_read_tokens": total_cache_r,
+        "active_keys": active_keys,
         "billing": {
-            "totalCost": format!("${:.6}", totals_all.total_cost),
-            "standardCost": format!("${:.6}", totals_all.standard_cost),
-            "fastCost": format!("${:.6}", totals_all.fast_cost),
-            "cacheSaved": format!("${:.6}", totals_all.cache_saved),
+            "total_cost_usd": totals_all.total_cost,
+            "standard_cost_usd": totals_all.standard_cost,
+            "fast_cost_usd": totals_all.fast_cost,
+            "cache_saved_usd": totals_all.cache_saved,
         },
-        "byModel": by_model,
-        "byKey": by_key,
+        "by_model": by_model,
+        "by_key": by_key,
         "channels": channels_json,
-        "recentRequests": recent,
+        "recent_requests": recent,
     }))
 }
 
@@ -271,4 +269,32 @@ fn bump_i64(obj: &mut serde_json::Map<String, Value>, key: &str, delta: i64) {
 fn bump_f64(obj: &mut serde_json::Map<String, Value>, key: &str, delta: f64) {
     let cur = obj.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
     obj.insert(key.to_string(), json!(cur + delta));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bump_helpers_accumulate() {
+        let mut m = serde_json::Map::new();
+        bump_i64(&mut m, "x", 3);
+        bump_i64(&mut m, "x", 4);
+        bump_f64(&mut m, "y", 1.5);
+        bump_f64(&mut m, "y", 2.5);
+        assert_eq!(m["x"], json!(7));
+        assert_eq!(m["y"], json!(4.0));
+    }
+
+    #[test]
+    fn channel_stats_default_zeros() {
+        let s = ChannelStats::default();
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["total_requests"], json!(0));
+        assert_eq!(v["total_errors"], json!(0));
+        assert_eq!(v["total_cost"], json!(0.0));
+        assert_eq!(v["standard_cost"], json!(0.0));
+        assert_eq!(v["fast_cost"], json!(0.0));
+        assert_eq!(v["cache_saved"], json!(0.0));
+    }
 }

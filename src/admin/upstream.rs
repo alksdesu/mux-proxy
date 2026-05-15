@@ -1,6 +1,6 @@
 //! /admin/upstream CRUD + /admin/upstream/breaker。
-//! 写操作经 UpstreamChangeNotifier 通知 key_pool 强制刷新；
-//! breaker reset/disable 操作直接走 BreakerRegistry。
+//! 写操作经 UpstreamChangeNotifier 通知 key_pool 强制刷新。
+//! breaker 接入由 P3 渠道层完成，本期端点仅做参数校验与桩响应。
 
 use crate::admin::query::{parse_channel, parse_id_required};
 use crate::app::AppState;
@@ -90,23 +90,23 @@ pub async fn delete_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> AppResult<axum::response::Response> {
     let id = parse_id_required(params.get("id").map(String::as_str))?;
-    let existing = db::upstream::find_by_id(&state.db, id)
+    let _ = db::upstream::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let ok = db::upstream::delete(&state.db, id, &state.upstream_notifier).await?;
     if ok {
-        state.breaker.reset(existing.channel_kind, id);
         state.snapshot.bump();
     }
     Ok(Json(serde_json::json!({ "ok": ok })).into_response())
 }
 
 pub async fn breaker_get_handler(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> AppResult<axum::response::Response> {
-    let channel = parse_channel(params.get("channel").map(String::as_str))?;
-    Ok(Json(state.breaker.snapshot(channel)).into_response())
+    let _ = parse_channel(params.get("channel").map(String::as_str))?;
+    let empty: Vec<serde_json::Value> = Vec::new();
+    Ok(Json(empty).into_response())
 }
 
 #[derive(Debug)]
@@ -123,6 +123,13 @@ impl BreakerAction {
             _ => Err(AppError::BadRequest("action must be reset or disable".into())),
         }
     }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            BreakerAction::Reset => "reset",
+            BreakerAction::Disable => "disable",
+        }
+    }
 }
 
 pub async fn breaker_post_handler(
@@ -135,13 +142,13 @@ pub async fn breaker_post_handler(
         .map(String::as_str)
         .ok_or_else(|| AppError::BadRequest("missing action".into()))?;
     let act = BreakerAction::parse(action)?;
-    let upstream = db::upstream::find_by_id(&state.db, id)
+    let _upstream = db::upstream::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    match act {
-        BreakerAction::Reset => state.breaker.reset(upstream.channel_kind, id),
-        BreakerAction::Disable => state.breaker.force_disable(upstream.channel_kind, id),
-    }
-    state.snapshot.bump();
-    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "action": act.as_str(),
+        "note": "pending breaker integration",
+    }))
+    .into_response())
 }

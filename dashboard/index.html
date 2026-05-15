@@ -10,7 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:where(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
   --bg: #09090b;
@@ -37,6 +37,15 @@
   --font: 'DM Sans', sans-serif;
   --mono: 'JetBrains Mono', monospace;
   --transition: 150ms ease;
+  --ch-btn-bg: var(--card);
+  --ch-btn-fg: var(--text-secondary);
+  --ch-btn-border: var(--border);
+  --ch-btn-hover-fg: var(--text);
+  --ch-btn-hover-border: var(--border-hover);
+  --ch-active-fg: var(--bg);
+  --ch-all-active-bg: var(--accent);
+  --ch-copilot-active-bg: var(--purple);
+  --ch-anthropic-active-bg: var(--orange);
 }
 
 html, body {
@@ -181,9 +190,9 @@ html, body {
 .ch-btn {
   flex: 1;
   padding: 6px 0;
-  background: var(--card);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
+  background: var(--ch-btn-bg);
+  color: var(--ch-btn-fg);
+  border: 1px solid var(--ch-btn-border);
   border-radius: var(--radius-sm);
   font-family: var(--font);
   font-size: 11px;
@@ -193,26 +202,24 @@ html, body {
 }
 
 .ch-btn:hover {
-  color: var(--text);
-  border-color: var(--border-hover);
+  color: var(--ch-btn-hover-fg);
+  border-color: var(--ch-btn-hover-border);
 }
 
 .ch-btn.active {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
+  color: var(--ch-active-fg);
+  background: var(--ch-all-active-bg);
+  border-color: var(--ch-all-active-bg);
 }
 
 .ch-btn[data-channel="copilot"].active {
-  background: var(--purple);
-  color: var(--bg);
-  border-color: var(--purple);
+  background: var(--ch-copilot-active-bg);
+  border-color: var(--ch-copilot-active-bg);
 }
 
 .ch-btn[data-channel="anthropic"].active {
-  background: var(--orange);
-  color: var(--bg);
-  border-color: var(--orange);
+  background: var(--ch-anthropic-active-bg);
+  border-color: var(--ch-anthropic-active-bg);
 }
 
 .channel-tag {
@@ -1785,7 +1792,8 @@ html, body {
 const API = window.location.origin;
 let KEY = '';
 let activeTab = 'overview';
-let currentChannel = sessionStorage.getItem('currentChannel') || 'all';
+const CHANNEL_STORAGE_KEY = 'mux-proxy-channel';
+let currentChannel = sessionStorage.getItem(CHANNEL_STORAGE_KEY) || 'all';
 let refreshTimer = null;
 let refreshMs = 10000;
 let refreshRunning = false;
@@ -1835,7 +1843,7 @@ function pickChannelKeys(snapshot) {
 function applyChannel(ch) {
   if (currentChannel === ch) return;
   currentChannel = ch;
-  sessionStorage.setItem('currentChannel', ch);
+  sessionStorage.setItem(CHANNEL_STORAGE_KEY, ch);
   document.querySelectorAll('.ch-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.channel === ch);
   });
@@ -1953,7 +1961,7 @@ async function loadOverview() {
     ]);
     renderMetrics(stats);
     renderCharts(stats, ts);
-    renderFeed(stats.recentRequests || []);
+    renderFeed(stats.recent_requests || []);
     updateConnStatus(true);
   } catch(e) {
     if (e.message !== 'auth') updateConnStatus(false);
@@ -1961,13 +1969,15 @@ async function loadOverview() {
 }
 
 function renderMetrics(s) {
+  const fmtUsd = (v) => '$' + Number(v || 0).toFixed(2);
+  const b = s.billing || {};
   const cards = [
-    { label: '总请求', value: Number(s.totalRequests).toLocaleString(), sub: '' },
-    { label: '总费用', value: s.billing?.totalCost || '$0', sub: `标准 ${s.billing?.standardCost} / Fast ${s.billing?.fastCost}` },
-    { label: '缓存节省', value: s.billing?.cacheSaved || '$0', sub: `${fmtNum(s.totalCacheReadTokens)} tokens 读取` },
-    { label: '活跃 Key', value: s.activeKeys ?? 0, sub: '' },
-    { label: '输入 Tokens', value: fmtNum(s.totalInputTokens), sub: `+${fmtNum(s.totalCacheCreationTokens)} 缓存写入` },
-    { label: '输出 Tokens', value: fmtNum(s.totalOutputTokens), sub: '' },
+    { label: '总请求', value: Number(s.total_requests || 0).toLocaleString(), sub: '' },
+    { label: '总费用', value: fmtUsd(b.total_cost_usd), sub: `标准 ${fmtUsd(b.standard_cost_usd)} / Fast ${fmtUsd(b.fast_cost_usd)}` },
+    { label: '缓存节省', value: fmtUsd(b.cache_saved_usd), sub: `${fmtNum(s.total_cache_read_tokens)} tokens 读取` },
+    { label: '活跃 Key', value: s.active_keys ?? 0, sub: '' },
+    { label: '输入 Tokens', value: fmtNum(s.total_input_tokens), sub: `+${fmtNum(s.total_cache_creation_tokens)} 缓存写入` },
+    { label: '输出 Tokens', value: fmtNum(s.total_output_tokens), sub: '' },
   ];
   document.getElementById('metric-cards').innerHTML = cards.map(c => `
     <div class="metric-card">
@@ -2008,8 +2018,9 @@ function renderCharts(stats, ts) {
   });
 
   // models doughnut
-  const modelNames = Object.keys(stats.byModel || {});
-  const modelReqs = modelNames.map(m => (stats.byModel[m]?.requests) || 0);
+  const byModel = stats.by_model || {};
+  const modelNames = Object.keys(byModel);
+  const modelReqs = modelNames.map(m => byModel[m]?.requests || 0);
   if (chartModels) chartModels.destroy();
   chartModels = new Chart(document.getElementById('chart-models'), {
     type: 'doughnut',
@@ -2018,8 +2029,9 @@ function renderCharts(stats, ts) {
   });
 
   // keys bar
-  const keyNames = Object.keys(stats.byKey || {});
-  const keyCosts = keyNames.map(k => parseFloat((stats.byKey[k]?.cost || '$0').replace('$', '')));
+  const byKey = stats.by_key || {};
+  const keyNames = Object.keys(byKey);
+  const keyCosts = keyNames.map(k => Number(byKey[k]?.cost_usd || 0));
   if (chartKeys) chartKeys.destroy();
   chartKeys = new Chart(document.getElementById('chart-keys'), {
     type: 'bar',
@@ -2034,8 +2046,8 @@ function renderFeed(recent) {
     <div class="feed-item">
       <span class="feed-time">${fmtTime(r.time)}</span>
       <span class="feed-model">${esc(r.model)}</span>
-      <span class="feed-key">${esc(r.key)}</span>
-      <span class="feed-cost">${esc(r.cost)}</span>
+      <span class="feed-key">${esc(r.key_name)}</span>
+      <span class="feed-cost">$${Number(r.cost_usd || 0).toFixed(6)}</span>
     </div>`).join('') : '<div class="loading-placeholder">暂无请求</div>';
 }
 

@@ -114,7 +114,6 @@ mod tests {
         use crate::app::AppState;
         use crate::auth::{KeyCache, SingleFlight};
         use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
-        use crate::breaker::Registry as BreakerRegistry;
         use crate::concurrency::Limiter;
         use crate::config::Config;
         use crate::db::upstream::UpstreamChangeNotifier;
@@ -153,7 +152,6 @@ mod tests {
             limiter,
             snapshot,
             usage_writer,
-            breaker: BreakerRegistry::new(),
             upstream_notifier: UpstreamChangeNotifier::new(),
         };
         super::build_admin_router(state.clone()).with_state(state)
