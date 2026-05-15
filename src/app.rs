@@ -5,6 +5,7 @@ use crate::auth::{KeyCache, KeyCacheEntry, SingleFlight};
 use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
 use crate::concurrency::Limiter;
 use crate::config::Config;
+use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub limiter: Arc<Limiter>,
     pub snapshot: Arc<SnapshotVersion>,
     pub usage_writer: UsageWriter,
+    /// admin 写 upstream_keys 时 bump，让 key_pool 下一轮 acquire 强制重读。
+    pub upstream_notifier: UpstreamChangeNotifier,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
             limiter,
             snapshot,
             usage_writer,
+            upstream_notifier: UpstreamChangeNotifier::new(),
         })
     }
 }
