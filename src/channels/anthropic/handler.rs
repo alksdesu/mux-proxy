@@ -127,9 +127,15 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
     // splice 段按 rewritten 决定（None 时事件按字节透传不动）。计费与改字节解耦。
     // gzip+SSE 极少见（Anthropic 默认 SSE 不带 gzip），暂走下面 buffered 路径兜底。
     if is_sse && !is_gzip {
-        let splice = match (rewritten_marker, new_model.clone(), original_model.clone()) {
-            (true, Some(c), Some(o)) => Some((c, o)),
-            _ => None,
+        // 错误状态码下永远不 splice：anthropic 渠道的核心承诺是 byte-for-byte 透传，
+        // 错误响应不能因为代理走过 rewrite 链路就被动了哪怕一个字段。
+        let splice = if status.is_success() {
+            match (rewritten_marker, new_model.clone(), original_model.clone()) {
+                (true, Some(c), Some(o)) => Some((c, o)),
+                _ => None,
+            }
+        } else {
+            None
         };
         return Ok(sse_tee_response(
             status,
@@ -212,11 +218,13 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
 
     drop(ctx.concurrency_guard);
 
-    let final_body = match (rewritten_marker, new_model, original_model) {
-        (true, Some(current), Some(original)) if is_gzip => {
+    // 错误状态码（非 2xx）一律字节透传：不解 gzip、不动 JSON model 字段。
+    // 既保 byte-for-byte 透传承诺，也避免错误响应被解-重压坏掉 gzip header 字节指纹。
+    let final_body = match (rewritten_marker, new_model, original_model, status.is_success()) {
+        (true, Some(current), Some(original), true) if is_gzip => {
             rewrite_gzip(buffered, &current, &original, is_sse)
         }
-        (true, Some(current), Some(original)) if is_json => {
+        (true, Some(current), Some(original), true) if is_json => {
             rewrite_json_response(buffered, &current, &original)
         }
         _ => buffered,
@@ -483,6 +491,84 @@ mod tests {
             classify_billing_action(false, StatusCode::INTERNAL_SERVER_ERROR, false),
             BillingAction::Skip
         );
+    }
+
+    /// 模拟 final_body 那一段 match 的纯逻辑：错误状态下任何 (rewritten, model) 组合都
+    /// 必须返回原 buffered，不能进 rewrite_json/gzip 路径。
+    fn final_body_choice(
+        rewritten: bool,
+        new_model: Option<&str>,
+        original_model: Option<&str>,
+        is_gzip: bool,
+        is_json: bool,
+        status: StatusCode,
+    ) -> &'static str {
+        match (
+            rewritten,
+            new_model,
+            original_model,
+            status.is_success(),
+        ) {
+            (true, Some(_), Some(_), true) if is_gzip => "rewrite_gzip",
+            (true, Some(_), Some(_), true) if is_json => "rewrite_json",
+            _ => "passthrough",
+        }
+    }
+
+    #[test]
+    fn error_status_skips_json_rewrite_even_when_rewritten() {
+        // 400 + rewritten=true + json + 有 current/original：上游错误 body 可能不带 model 字段也可能带，
+        // 无论如何代理都不能动字节。
+        let choice = final_body_choice(
+            true,
+            Some("claude-jupiter-v1-p"),
+            Some("claude-opus-4-7"),
+            false,
+            true,
+            StatusCode::BAD_REQUEST,
+        );
+        assert_eq!(choice, "passthrough", "4xx must not enter rewrite path");
+    }
+
+    #[test]
+    fn error_status_skips_gzip_decompress_recompress() {
+        // 5xx gzip 错误响应：不能解-改-压，否则 gzip header mtime/level 等字节会和上游不一致。
+        let choice = final_body_choice(
+            true,
+            Some("claude-jupiter-v1-p"),
+            Some("claude-opus-4-7"),
+            true,
+            false,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+        assert_eq!(choice, "passthrough", "5xx gzip must passthrough byte-for-byte");
+    }
+
+    #[test]
+    fn success_json_with_rewrite_still_routes_to_rewrite() {
+        // 防退化：2xx + rewritten + json 必须仍然走 rewrite_json，否则 model 字段还原失效。
+        let choice = final_body_choice(
+            true,
+            Some("claude-jupiter-v1-p"),
+            Some("claude-opus-4-7"),
+            false,
+            true,
+            StatusCode::OK,
+        );
+        assert_eq!(choice, "rewrite_json");
+    }
+
+    #[test]
+    fn success_gzip_with_rewrite_routes_to_rewrite_gzip() {
+        let choice = final_body_choice(
+            true,
+            Some("c"),
+            Some("o"),
+            true,
+            false,
+            StatusCode::OK,
+        );
+        assert_eq!(choice, "rewrite_gzip");
     }
 
     #[test]
