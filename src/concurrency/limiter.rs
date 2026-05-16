@@ -102,13 +102,13 @@ impl Limiter {
         self.snapshot.bump();
     }
 
-    /// 单次 GC 扫描：删 last_seen 超过 stale_after 且 count==0 的项。
-    /// 正在使用（count>0）的项即使老也保留——可能是 240s 上游超时 + thinking 的长任务。
-    /// 真的 600s 没动过且 count>0 视为 leak，强制清掉。
+    /// 单次 GC 扫描：删 count==0 且 last_seen 超 stale_after 的项。
+    /// count>0 的活跃 entry 保留——可能是上游超时 + thinking 的长任务。
     pub fn run_gc_once(&self) {
         let now = Instant::now();
         let stale = self.stale_after;
-        self.inner.retain(|_, e| now.duration_since(e.last_seen) < stale);
+        self.inner
+            .retain(|_, e| e.count > 0 || now.duration_since(e.last_seen) < stale);
     }
 
     /// 长期 GC 循环。caller spawn 一次即可，进程退出时通过 tokio runtime 终止。
@@ -243,5 +243,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         l.run_gc_once();
         assert_eq!(l.tracked_keys(), 0);
+    }
+
+    #[test]
+    fn gc_keeps_active_entries() {
+        let snap = Arc::new(SnapshotVersion::new());
+        let l = Limiter::with_intervals(
+            snap.clone(),
+            Duration::from_millis(0),
+            Duration::from_secs(60),
+        );
+        let _hold = l.try_acquire("a", -1).expect("acquire");
+        std::thread::sleep(Duration::from_millis(2));
+        l.run_gc_once();
+        assert_eq!(l.tracked_keys(), 1, "active count>0 must survive GC");
+        assert_eq!(l.current("a"), 1);
     }
 }

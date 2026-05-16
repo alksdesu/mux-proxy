@@ -523,19 +523,7 @@ impl CopilotHandler {
 
         // Web Search loop
         if web_cfg.active && json.get("stop_reason").and_then(|v| v.as_str()) == Some("tool_use") {
-            if let Some(exa_key) = self
-                .config
-                .exa_api_keys
-                .iter()
-                .filter(|k| !k.is_empty())
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .into_iter()
-                .next()
-                .map(|s| s.to_string())
-            {
-                let exa_key = web_search::pick_exa_key(&self.config.exa_api_keys.join(","))
-                    .unwrap_or(exa_key);
+            if let Some(exa_key) = web_search::pick_exa_key(&self.config.exa_api_keys) {
                 let parsed_body_value = parsed_body.unwrap_or(Value::Null);
                 let outcome = web_search::run_loop(web_search::LoopInputs {
                     http: self.http.clone(),

@@ -9,9 +9,6 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub http_addr: SocketAddr,
-    pub tls_addr: Option<SocketAddr>,
-    pub tls_cert_path: Option<String>,
-    pub tls_key_path: Option<String>,
     pub database_url: String,
     pub admin_key: String,
     pub exa_api_keys: Vec<String>,
@@ -32,12 +29,6 @@ impl Config {
         let http_port: u16 = env_or("PORT", "7777").parse()
             .map_err(|e| AppError::Config(format!("invalid PORT: {e}")))?;
         let http_addr = SocketAddr::from(([0, 0, 0, 0], http_port));
-
-        let tls_port: Option<u16> = match env::var("TLS_PORT").ok().filter(|s| !s.is_empty()) {
-            Some(s) => Some(s.parse().map_err(|e| AppError::Config(format!("invalid TLS_PORT: {e}")))?),
-            None => None,
-        };
-        let tls_addr = tls_port.map(|p| SocketAddr::from(([0, 0, 0, 0], p)));
 
         let database_url = env::var("DATABASE_URL")
             .map_err(|_| AppError::Config("DATABASE_URL must be set".into()))?;
@@ -69,9 +60,6 @@ impl Config {
 
         Ok(Config {
             http_addr,
-            tls_addr,
-            tls_cert_path: env::var("TLS_CERT_PATH").ok(),
-            tls_key_path: env::var("TLS_KEY_PATH").ok(),
             database_url,
             admin_key,
             exa_api_keys,

@@ -126,9 +126,6 @@ mod tests {
 
         let cfg = Config {
             http_addr: "0.0.0.0:0".parse().unwrap(),
-            tls_addr: None,
-            tls_cert_path: None,
-            tls_key_path: None,
             database_url: "postgres://stub".into(),
             admin_key: "stub-admin-key-must-be-at-least-16-chars".into(),
             exa_api_keys: vec![],

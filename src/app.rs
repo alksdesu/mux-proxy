@@ -11,6 +11,7 @@ use crate::concurrency::Limiter;
 use crate::config::Config;
 use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
+use crate::util::inflight::{InflightGuard, InflightTracker};
 use axum::extract::ConnectInfo;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -41,6 +42,7 @@ pub async fn run() -> AppResult<()> {
     info!(addr = %bind_addr, "listening");
 
     let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(1);
+    let inflight = InflightTracker::new();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -55,7 +57,8 @@ pub async fn run() -> AppResult<()> {
                         continue;
                     }
                 };
-                spawn_connection(stream, peer_addr, router.clone(), shutdown_tx.subscribe());
+                let guard = inflight.enter();
+                spawn_connection(stream, peer_addr, router.clone(), shutdown_tx.subscribe(), guard);
             }
             _ = &mut shutdown => {
                 info!("shutdown signal received; closing accept loop");
@@ -65,9 +68,14 @@ pub async fn run() -> AppResult<()> {
         }
     }
 
-    // 给 in-flight conn task 一段时间完成 graceful_shutdown 后的清理。
-    info!(timeout = ?GRACEFUL_DRAIN_TIMEOUT, "waiting for in-flight requests");
-    tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT).await;
+    let in_flight = inflight.current();
+    info!(in_flight, timeout = ?GRACEFUL_DRAIN_TIMEOUT, "draining in-flight connections");
+    tokio::select! {
+        _ = inflight.wait_drained() => info!("all connections drained"),
+        _ = tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT) => {
+            warn!(remaining = inflight.current(), "drain timeout, forcing exit");
+        }
+    }
     info!("shutdown complete");
     Ok(())
 }
@@ -77,8 +85,11 @@ fn spawn_connection(
     peer_addr: SocketAddr,
     router: axum::Router,
     mut shutdown_rx: broadcast::Receiver<()>,
+    inflight_guard: InflightGuard,
 ) {
     tokio::spawn(async move {
+        // guard 在 task 结束时 drop，触发 wait_drained 唤醒。
+        let _guard = inflight_guard;
         let io = TokioIo::new(stream);
         let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
             // 把 peer 地址塞 extensions，host_guard / 客户端 IP 提取走 cf-connecting-ip

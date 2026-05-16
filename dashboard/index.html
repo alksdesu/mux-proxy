@@ -1668,6 +1668,13 @@ html, body {
       <input type="text" id="ck-name" placeholder="用户名">
     </div>
     <div class="form-group">
+      <label>渠道</label>
+      <select id="ck-channel" onchange="syncCreateKeyChannel()">
+        <option value="copilot">Copilot</option>
+        <option value="anthropic">Anthropic</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label>上游密钥模式</label>
       <select id="ck-upstream-mode" onchange="document.getElementById('ck-upstream-group').style.display=this.value==='direct'?'':'none'">
         <option value="pool">全局池轮询（默认）</option>
@@ -1675,7 +1682,7 @@ html, body {
       </select>
     </div>
     <div class="form-group" id="ck-upstream-group" style="display:none">
-      <label>上游密钥（enterprise:ghp_xxx）</label>
+      <label id="ck-upstream-label">上游密钥（enterprise:ghp_xxx）</label>
       <input type="text" id="ck-upstream" placeholder="enterprise:ghp_xxx">
     </div>
     <div class="form-row">
@@ -1688,7 +1695,7 @@ html, body {
         <input type="number" id="ck-concurrency" value="-1">
       </div>
     </div>
-    <div class="form-group">
+    <div class="form-group" id="ck-fast-group">
       <label>允许 Fast</label>
       <select id="ck-fast">
         <option value="true">是</option>
@@ -1711,7 +1718,14 @@ html, body {
       <input type="text" id="au-name" placeholder="备注名称">
     </div>
     <div class="form-group">
-      <label>密钥</label>
+      <label>渠道</label>
+      <select id="au-channel" onchange="syncUpstreamChannel()">
+        <option value="copilot">Copilot</option>
+        <option value="anthropic">Anthropic</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label id="au-key-label">密钥（enterprise:ghp_xxx）</label>
       <input type="text" id="au-key" placeholder="enterprise:ghp_xxx">
     </div>
     <div class="form-group">
@@ -1733,6 +1747,10 @@ html, body {
       <label>名称</label>
       <input type="text" id="ek-name">
     </div>
+    <div class="form-group">
+      <label>渠道</label>
+      <div id="ek-channel-badge"></div>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label>额度 ($, -1 = 无限)</label>
@@ -1743,7 +1761,7 @@ html, body {
         <input type="number" id="ek-concurrency">
       </div>
     </div>
-    <div class="form-group">
+    <div class="form-group" id="ek-fast-group">
       <label>允许 Fast</label>
       <select id="ek-fast">
         <option value="true">是</option>
@@ -1758,7 +1776,7 @@ html, body {
       </select>
     </div>
     <div class="form-group" id="ek-upstream-direct-group" style="display:none">
-      <label>上游密钥（enterprise:ghp_xxx）</label>
+      <label id="ek-upstream-label">上游密钥（enterprise:ghp_xxx）</label>
       <input type="text" id="ek-upstream" placeholder="enterprise:ghp_xxx">
     </div>
     <div class="modal-actions">
@@ -1855,6 +1873,29 @@ function channelTag(channel) {
   if (!channel) return '';
   const label = channel.charAt(0).toUpperCase() + channel.slice(1);
   return `<span class="channel-tag ch-${channel}">${label}</span>`;
+}
+
+// 新增渠道时只需在此扩展。
+const CHANNEL_META = {
+  copilot:   { placeholder: 'enterprise:ghp_xxx',  label: '上游密钥（enterprise:ghp_xxx）',  testModel: 'claude-opus-4-6' },
+  anthropic: { placeholder: 'anthropic:sk-ant-xxx', label: '上游密钥（anthropic:sk-ant-xxx）', testModel: 'claude-sonnet-4-5' },
+};
+
+function channelMeta(channel) {
+  return CHANNEL_META[channel] || CHANNEL_META.copilot;
+}
+
+// 把当前渠道的 placeholder / label / Fast 可见性写入指定 modal 字段。
+// fastGroupId 传 null 表示该 modal 没有 Fast 字段（如上游密钥 modal）。
+function applyChannelToModal(channel, { keyInputId, keyLabelId, fastGroupId, labelTemplate }) {
+  const meta = channelMeta(channel);
+  document.getElementById(keyInputId).placeholder = meta.placeholder;
+  document.getElementById(keyLabelId).textContent = labelTemplate
+    ? labelTemplate.replace('{placeholder}', meta.placeholder)
+    : meta.label;
+  if (fastGroupId) {
+    document.getElementById(fastGroupId).style.display = channel === 'anthropic' ? 'none' : '';
+  }
 }
 
 function pickChannelKeys(snapshot) {
@@ -2117,7 +2158,9 @@ function renderKeys(keys) {
       </td>
       <td class="mono" data-col="used">${k.used_display}</td>
       <td data-col="allow_fast">
-        <span class="badge ${k.allow_fast ? 'badge-green' : 'badge-red'}" style="cursor:pointer" onclick="toggleFast(${k.id},${k.allow_fast})">${k.allow_fast ? 'ON' : 'OFF'}</span>
+        ${(k.channel_kind || 'copilot') === 'anthropic'
+          ? `<span style="color:var(--text-muted);font-size:11px" title="Anthropic 渠道无 Fast 版本">—</span>`
+          : `<span class="badge ${k.allow_fast ? 'badge-green' : 'badge-red'}" style="cursor:pointer" onclick="toggleFast(${k.id},${k.allow_fast})">${k.allow_fast ? 'ON' : 'OFF'}</span>`}
       </td>
       <td data-col="max_concurrency"><span class="mono editable" title="双击编辑" ondblclick="startInlineEdit(this,${k.id},'max_concurrency',${k.max_concurrency})">${k.max_concurrency === -1 ? '∞' : k.max_concurrency}</span></td>
       <td class="mono" data-col="current_concurrency">${k.current_concurrency}</td>
@@ -2176,11 +2219,18 @@ async function toggleFast(id, current) {
 function openEditKey(id) {
   const k = cachedKeys.find(x => x.id === id);
   if (!k) return;
+  const channel = k.channel_kind || 'copilot';
   document.getElementById('ek-id').value = id;
+  document.getElementById('ek-channel-badge').innerHTML = channelTag(channel);
   document.getElementById('ek-name').value = k.name;
   document.getElementById('ek-quota').value = k.quota;
   document.getElementById('ek-concurrency').value = k.max_concurrency;
   document.getElementById('ek-fast').value = k.allow_fast ? 'true' : 'false';
+  applyChannelToModal(channel, {
+    keyInputId: 'ek-upstream',
+    keyLabelId: 'ek-upstream-label',
+    fastGroupId: 'ek-fast-group',
+  });
   const upstreamKey = k.upstream_key || '';
   const isDirect = upstreamKey && upstreamKey !== '*' && !/^\d+(,\d+)*$/.test(upstreamKey);
   document.getElementById('ek-upstream-mode').value = isDirect ? 'direct' : 'pool';
@@ -2196,16 +2246,20 @@ function toggleUpstreamInput() {
 }
 
 async function saveEditKey() {
-  const id = document.getElementById('ek-id').value;
+  const id = parseInt(document.getElementById('ek-id').value);
+  const channel = (cachedKeys.find(x => x.id === id) || {}).channel_kind || 'copilot';
   const mode = document.getElementById('ek-upstream-mode').value;
   const upstreamVal = mode === 'direct' ? document.getElementById('ek-upstream').value.trim() : '*';
   const body = {
     name: document.getElementById('ek-name').value.trim(),
     quota: parseFloat(document.getElementById('ek-quota').value),
     max_concurrency: parseInt(document.getElementById('ek-concurrency').value),
-    allow_fast: document.getElementById('ek-fast').value === 'true',
     upstream_key: upstreamVal,
   };
+  // Anthropic 渠道 allow_fast 无意义，不发以免覆盖。
+  if (channel !== 'anthropic') {
+    body.allow_fast = document.getElementById('ek-fast').value === 'true';
+  }
   try {
     await api('PATCH', `/admin/keys?id=${id}`, body);
     toast('已保存', 'success');
@@ -2214,31 +2268,47 @@ async function saveEditKey() {
   } catch(e) { toast('保存失败: ' + e.message, 'error'); }
 }
 
+function syncCreateKeyChannel() {
+  applyChannelToModal(document.getElementById('ck-channel').value, {
+    keyInputId: 'ck-upstream',
+    keyLabelId: 'ck-upstream-label',
+    fastGroupId: 'ck-fast-group',
+  });
+}
+
 function showCreateKeyModal() {
   document.getElementById('ck-name').value = '';
+  const defaultChannel = currentChannel === 'anthropic' ? 'anthropic' : 'copilot';
+  document.getElementById('ck-channel').value = defaultChannel;
   document.getElementById('ck-upstream-mode').value = 'pool';
   document.getElementById('ck-upstream').value = '';
   document.getElementById('ck-upstream-group').style.display = 'none';
   document.getElementById('ck-quota').value = '-1';
   document.getElementById('ck-concurrency').value = '-1';
   document.getElementById('ck-fast').value = 'true';
+  syncCreateKeyChannel();
   openModal('modal-create-key');
 }
 
 async function createKey() {
   const name = document.getElementById('ck-name').value.trim();
+  const channel = document.getElementById('ck-channel').value;
   const mode = document.getElementById('ck-upstream-mode').value;
   const upstream = mode === 'direct' ? document.getElementById('ck-upstream').value.trim() : '*';
   if (!name) { toast('名称为必填项', 'error'); return; }
   if (mode === 'direct' && !upstream) { toast('直连模式需要填写上游密钥', 'error'); return; }
+  const body = {
+    name,
+    upstream_key: upstream,
+    quota: parseFloat(document.getElementById('ck-quota').value),
+    max_concurrency: parseInt(document.getElementById('ck-concurrency').value),
+    channel_kind: channel,
+  };
+  if (channel !== 'anthropic') {
+    body.allow_fast = document.getElementById('ck-fast').value === 'true';
+  }
   try {
-    const res = await api('POST', '/admin/keys', {
-      name,
-      upstream_key: upstream,
-      quota: parseFloat(document.getElementById('ck-quota').value),
-      allow_fast: document.getElementById('ck-fast').value === 'true',
-      max_concurrency: parseInt(document.getElementById('ck-concurrency').value),
-    });
+    const res = await api('POST', '/admin/keys', body);
     toast(`密钥已创建: ${res.key}`, 'success');
     closeModal('modal-create-key');
     loadKeys();
@@ -2247,15 +2317,16 @@ async function createKey() {
 
 
 
-async function testUpstreamKey(upstreamKey, btnEl) {
+async function testUpstreamKey(upstreamKey, btnEl, channelKind) {
   const resultEl = btnEl?.nextElementSibling;
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '...'; }
   if (resultEl) { resultEl.className = 'test-result loading'; resultEl.textContent = '测试中'; }
+  const model = channelMeta(channelKind || 'copilot').testModel;
   try {
     const r = await fetch(`${API}/v1/messages`, {
       method: 'POST',
       headers: { 'x-api-key': upstreamKey, 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-opus-4-6', max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] })
+      body: JSON.stringify({ model, max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] })
     });
     const ok = r.status === 200;
     if (resultEl) {
@@ -2294,7 +2365,7 @@ async function testAllKeys() {
     const resultEl = testBtn?.nextElementSibling;
     if (testBtn) { testBtn.disabled = true; testBtn.textContent = '...'; }
     if (resultEl) { resultEl.className = 'test-result loading'; resultEl.textContent = '测试中'; }
-    const ok = await testUpstreamKey(k.upstream_key, testBtn);
+    const ok = await testUpstreamKey(k.upstream_key, testBtn, k.channel_kind || 'copilot');
     if (ok) okCount++; else failCount++;
     // mark other keys with same upstream_key
     for (const k2 of cachedKeys) {
@@ -2795,7 +2866,7 @@ function renderUpstreamKeys(rows) {
       <td>
         <span class="key-masked" onclick="toggleKeyReveal(this,'${esc(r.key)}')" title="点击显示/复制">${esc(masked)}</span>
         <button class="btn btn-sm" style="margin-left:4px;padding:2px 6px;font-size:10px" onclick="copyText('${esc(r.key)}')">复制</button>
-        <button class="btn btn-sm" style="margin-left:2px;padding:2px 6px;font-size:10px" onclick="testUpstreamKey('${esc(r.key)}',this)" id="test-upstream-${r.id}">测试</button>
+        <button class="btn btn-sm" style="margin-left:2px;padding:2px 6px;font-size:10px" onclick="testUpstreamKey('${esc(r.key)}',this,'${esc(r.channel_kind || 'copilot')}')" id="test-upstream-${r.id}">测试</button>
         <span class="test-result" id="test-upstream-result-${r.id}"></span>
       </td>
       <td>
@@ -2811,11 +2882,22 @@ function renderUpstreamKeys(rows) {
   }).join('');
 }
 
+function syncUpstreamChannel() {
+  applyChannelToModal(document.getElementById('au-channel').value, {
+    keyInputId: 'au-key',
+    keyLabelId: 'au-key-label',
+    labelTemplate: '密钥（{placeholder}）',
+  });
+}
+
 function showAddUpstreamModal() {
   document.getElementById('au-id').value = '';
   document.getElementById('au-name').value = '';
   document.getElementById('au-key').value = '';
   document.getElementById('au-note').value = '';
+  const defaultChannel = currentChannel === 'anthropic' ? 'anthropic' : 'copilot';
+  document.getElementById('au-channel').value = defaultChannel;
+  syncUpstreamChannel();
   document.getElementById('upstream-modal-title').textContent = '添加上游密钥';
   openModal('modal-add-upstream');
 }
@@ -2827,6 +2909,8 @@ function editUpstream(id) {
   document.getElementById('au-name').value = r.name;
   document.getElementById('au-key').value = r.key;
   document.getElementById('au-note').value = r.note || '';
+  document.getElementById('au-channel').value = r.channel_kind || 'copilot';
+  syncUpstreamChannel();
   document.getElementById('upstream-modal-title').textContent = '编辑上游密钥';
   openModal('modal-add-upstream');
 }
@@ -2836,12 +2920,14 @@ async function saveUpstream() {
   const name = document.getElementById('au-name').value.trim();
   const key = document.getElementById('au-key').value.trim();
   const note = document.getElementById('au-note').value.trim();
+  const channel = document.getElementById('au-channel').value;
   if (!key) { toast('密钥不能为空', 'error'); return; }
   try {
     if (id) {
-      await api('PATCH', `/admin/upstream?id=${id}`, { name, key, note });
+      // 让用户改 key 时能同步改渠道，后端会校验 channel 与 key 前缀一致。
+      await api('PATCH', `/admin/upstream?id=${id}`, { name, key, note, channel_kind: channel });
     } else {
-      await api('POST', '/admin/upstream', { name, key, note });
+      await api('POST', '/admin/upstream', { name, key, note, channel_kind: channel });
     }
     toast(id ? '已更新' : '已添加', 'success');
     closeModal('modal-add-upstream');
@@ -2877,7 +2963,7 @@ async function testAllUpstream() {
   let ok = 0, fail = 0;
   for (const u of cachedUpstream) {
     const testBtn = document.getElementById(`test-upstream-${u.id}`);
-    const result = await testUpstreamKey(u.key, testBtn);
+    const result = await testUpstreamKey(u.key, testBtn, u.channel_kind || 'copilot');
     if (result) ok++; else fail++;
   }
   btn.disabled = false;

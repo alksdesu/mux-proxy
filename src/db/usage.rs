@@ -33,8 +33,8 @@ pub async fn insert_usage(db: &Db, rec: UsageLogInput) -> AppResult<i64> {
     .fetch_one(db.pool())
     .await?;
 
-    let id: i32 = row.try_get("id")?;
-    Ok(id as i64)
+    let id: i64 = row.try_get("id")?;
+    Ok(id)
 }
 
 pub async fn cleanup_request_bodies(db: &Db, key_name: &str) -> AppResult<()> {
@@ -113,7 +113,7 @@ pub async fn get_usage_by_id(db: &Db, id: i64) -> AppResult<Option<UsageLog>> {
         "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
                 key_name, request_body, ip, cost_usd, channel_kind FROM usage_logs WHERE id = $1",
     )
-    .bind(id as i32)
+    .bind(id)
     .fetch_optional(db.pool())
     .await?;
     Ok(row)

@@ -61,7 +61,7 @@ pub async fn find_by_id(db: &Db, id: i64) -> AppResult<Option<UpstreamKey>> {
         "SELECT id, key, name, enabled, note, created_at, channel_kind \
          FROM upstream_keys WHERE id = $1",
     )
-    .bind(id as i32)
+    .bind(id)
     .fetch_optional(db.pool())
     .await?;
     Ok(row)
@@ -151,7 +151,7 @@ pub async fn update(
     if let Some(v) = patch.channel_kind {
         q = q.bind(v.as_str());
     }
-    q = q.bind(id as i32);
+    q = q.bind(id);
 
     let updated = q.fetch_optional(db.pool()).await?;
     if updated.is_some() {
@@ -171,7 +171,7 @@ pub async fn update_enabled(
          RETURNING id, key, name, enabled, note, created_at, channel_kind",
     )
     .bind(if enabled { 1i32 } else { 0i32 })
-    .bind(id as i32)
+    .bind(id)
     .fetch_optional(db.pool())
     .await?;
     if row.is_some() {
@@ -186,7 +186,7 @@ pub async fn delete(
     notifier: &UpstreamChangeNotifier,
 ) -> AppResult<bool> {
     let affected = sqlx::query("DELETE FROM upstream_keys WHERE id = $1")
-        .bind(id as i32)
+        .bind(id)
         .execute(db.pool())
         .await?
         .rows_affected();

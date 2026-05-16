@@ -447,19 +447,14 @@ fn write_sse_event(out: &mut String, kind: &str, data: &Value) {
     out.push_str("\n\n");
 }
 
-/// 多 key 逗号分割 + 随机选一个；空集合返回 None。
-pub fn pick_exa_key(joined: &str) -> Option<String> {
-    let pool: Vec<&str> = joined
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if pool.is_empty() {
+/// 从 key 池里随机选一个非空 key。
+pub fn pick_exa_key(pool: &[String]) -> Option<String> {
+    let valid: Vec<&str> = pool.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if valid.is_empty() {
         return None;
     }
     use rand::Rng;
-    let idx = rand::thread_rng().gen_range(0..pool.len());
-    Some(pool[idx].to_string())
+    Some(valid[rand::thread_rng().gen_range(0..valid.len())].to_string())
 }
 
 /// 折算搜索次数到等价 input_tokens 数：用本模型 input 单价折算 $0.01/搜索的成本向上取整。
@@ -924,11 +919,12 @@ mod tests {
     }
 
     #[test]
-    fn pick_exa_key_handles_comma_list() {
-        let k = pick_exa_key("a, b, c").expect("some");
+    fn pick_exa_key_handles_pool() {
+        let pool = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let k = pick_exa_key(&pool).expect("some");
         assert!(["a", "b", "c"].contains(&k.as_str()));
-        assert!(pick_exa_key("").is_none());
-        assert!(pick_exa_key(",, ,").is_none());
+        assert!(pick_exa_key(&[]).is_none());
+        assert!(pick_exa_key(&["".to_string(), " ".to_string()]).is_none());
     }
 
     #[test]

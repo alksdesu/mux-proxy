@@ -134,11 +134,9 @@ pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::App
         .collect();
 
     let copilot_breaker = state.copilot_breaker.snapshot();
-    let breaker_by_channel = json!({
-        "copilot": copilot_breaker,
-        // Anthropic 渠道 breaker 在 KeyPool 内部，by-id snapshot 未暴露。
-        "anthropic": Vec::<Value>::new(),
-    });
+    let anthropic_breaker = state.anthropic_pool.snapshot_breakers();
+    let breaker_all: Vec<&crate::channels::BreakerSnapshot> =
+        copilot_breaker.iter().chain(anthropic_breaker.iter()).collect();
 
     Ok(json!({
         "keys": snapshot_keys,
@@ -148,8 +146,11 @@ pub async fn build_snapshot(state: &AppState) -> Result<Value, crate::error::App
             "copilot": totals_copilot,
             "anthropic": totals_anthropic,
         },
-        "breaker": copilot_breaker,
-        "breaker_by_channel": breaker_by_channel,
+        "breaker": breaker_all,
+        "breaker_by_channel": {
+            "copilot": copilot_breaker,
+            "anthropic": anthropic_breaker,
+        },
         "snapshot_version": state.snapshot.current(),
     }))
 }
@@ -160,8 +161,8 @@ async fn fetch_channel_totals(
     state: &AppState,
 ) -> Result<HashMap<ChannelKind, ChannelTotals>, crate::error::AppError> {
     let rows = sqlx::query(
-        "SELECT u.channel_kind AS ch, \
-                u.requests AS requests, \
+        "SELECT COALESCE(u.channel_kind, e.channel_kind) AS ch, \
+                COALESCE(u.requests, 0)::BIGINT AS requests, \
                 COALESCE(u.cost_total, 0)::DOUBLE PRECISION AS cost_total, \
                 COALESCE(e.errors, 0)::BIGINT AS errors \
          FROM ( \
@@ -183,9 +184,6 @@ async fn fetch_channel_totals(
     let mut out: HashMap<ChannelKind, ChannelTotals> = HashMap::new();
     for row in rows {
         let ch_str: Option<String> = row.try_get("ch").ok();
-        // FULL OUTER JOIN 在 errors-only 渠道（usage 为空）会让 u.channel_kind=NULL。
-        // 该路径下我们用 e.channel_kind，但 SELECT 取的是 u.channel_kind 别名 ch；
-        // 极端情况丢这条统计可接受（生产 0 usage 才进），监控可加日志。
         let Some(ch_str) = ch_str else { continue };
         let Some(ch) = ChannelKind::parse(&ch_str) else { continue };
         let requests: i64 = row.try_get("requests").unwrap_or(0);

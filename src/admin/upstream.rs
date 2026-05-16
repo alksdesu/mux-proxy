@@ -1,10 +1,10 @@
 //! /admin/upstream CRUD + /admin/upstream/breaker。
 //! 写操作经 UpstreamChangeNotifier 通知 key_pool 强制刷新。
-//! breaker 只接 Copilot 渠道；Anthropic 渠道熔断在 KeyPool 内部，未暴露 by-id API。
+//! breaker 同时覆盖 Copilot（外置 ``Breaker``）与 Anthropic（``KeyPool`` 内置熔断器）。
 
 use crate::admin::query::{parse_channel, parse_id_required};
 use crate::app::AppState;
-use crate::channels::{ChannelKind, route_by_upstream_key};
+use crate::channels::{BreakerSnapshot, ChannelKind, route_by_upstream_key};
 use crate::db;
 use crate::db::schema::UpstreamKeyPatch;
 use crate::error::{AppError, AppResult};
@@ -13,6 +13,20 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::collections::HashMap;
+
+pub fn collect_breaker_snapshot(
+    state: &AppState,
+    channel: Option<ChannelKind>,
+) -> Vec<BreakerSnapshot> {
+    let mut out: Vec<BreakerSnapshot> = Vec::new();
+    if matches!(channel, None | Some(ChannelKind::Copilot)) {
+        out.extend(state.copilot_breaker.snapshot());
+    }
+    if matches!(channel, None | Some(ChannelKind::Anthropic)) {
+        out.extend(state.anthropic_pool.snapshot_breakers());
+    }
+    out
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBody {
@@ -105,10 +119,7 @@ pub async fn breaker_get_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> AppResult<axum::response::Response> {
     let channel = parse_channel(params.get("channel").map(String::as_str))?;
-    let snapshot = match channel {
-        None | Some(ChannelKind::Copilot) => state.copilot_breaker.snapshot(),
-        Some(ChannelKind::Anthropic) => Vec::new(),
-    };
+    let snapshot = collect_breaker_snapshot(&state, channel);
     Ok(Json(snapshot).into_response())
 }
 
@@ -149,21 +160,21 @@ pub async fn breaker_post_handler(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    // Anthropic upstream id 不映射到 Copilot 的 breaker，直接 200 返回 noop 状态。
-    // 想真控 Anthropic 渠道熔断需要先给 anthropic::KeyPool 暴露 by-id API。
-    if upstream.channel_kind == ChannelKind::Copilot {
-        match act {
-            BreakerAction::Reset => state.copilot_breaker.reset(id),
-            BreakerAction::Disable => state.copilot_breaker.force_disable(id),
+    match (upstream.channel_kind, &act) {
+        (ChannelKind::Copilot, BreakerAction::Reset) => state.copilot_breaker.reset(id),
+        (ChannelKind::Copilot, BreakerAction::Disable) => state.copilot_breaker.force_disable(id),
+        (ChannelKind::Anthropic, BreakerAction::Reset) => state.anthropic_pool.reset_breaker(id),
+        (ChannelKind::Anthropic, BreakerAction::Disable) => {
+            state.anthropic_pool.force_disable_breaker(id)
         }
-        state.snapshot.bump();
     }
+    state.snapshot.bump();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
         "action": act.as_str(),
         "channel": upstream.channel_kind.as_str(),
-        "applied": upstream.channel_kind == ChannelKind::Copilot,
+        "applied": true,
     }))
     .into_response())
 }

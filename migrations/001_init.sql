@@ -2,7 +2,7 @@
 -- 每张表直接带 channel_kind，usage_logs 多一列 cost_usd 预算好直接写。
 
 CREATE TABLE IF NOT EXISTS usage_logs (
-  id SERIAL PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   time TEXT NOT NULL,
   model TEXT NOT NULL,
   input_tokens BIGINT NOT NULL DEFAULT 0,
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (
-  id SERIAL PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   key TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   upstream_key TEXT NOT NULL DEFAULT '*',
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE TABLE IF NOT EXISTS error_logs (
-  id SERIAL PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   time TEXT NOT NULL,
   key_name TEXT NOT NULL DEFAULT '',
   status INTEGER NOT NULL DEFAULT 0,
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS error_logs (
 );
 
 CREATE TABLE IF NOT EXISTS upstream_keys (
-  id SERIAL PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   key TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL DEFAULT '',
   enabled INTEGER NOT NULL DEFAULT 1,

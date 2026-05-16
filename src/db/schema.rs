@@ -25,7 +25,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ApiKey {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let allow_fast_int: i32 = row.try_get("allow_fast")?;
         Ok(ApiKey {
-            id: row.try_get::<i32, _>("id")? as i64,
+            id: row.try_get("id")?,
             key: row.try_get("key")?,
             name: row.try_get("name")?,
             upstream_key: row.try_get("upstream_key")?,
@@ -67,7 +67,7 @@ pub struct UsageLog {
 impl<'r> sqlx::FromRow<'r, PgRow> for UsageLog {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(UsageLog {
-            id: row.try_get::<i32, _>("id")? as i64,
+            id: row.try_get("id")?,
             time: row.try_get("time")?,
             model: row.try_get("model")?,
             input_tokens: row.try_get("input_tokens")?,
@@ -115,7 +115,7 @@ pub struct ErrorLog {
 impl<'r> sqlx::FromRow<'r, PgRow> for ErrorLog {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(ErrorLog {
-            id: row.try_get::<i32, _>("id")? as i64,
+            id: row.try_get("id")?,
             time: row.try_get("time")?,
             key_name: row.try_get("key_name")?,
             status: row.try_get("status")?,
@@ -157,7 +157,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for UpstreamKey {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let enabled_int: i32 = row.try_get("enabled")?;
         Ok(UpstreamKey {
-            id: row.try_get::<i32, _>("id")? as i64,
+            id: row.try_get("id")?,
             key: row.try_get("key")?,
             name: row.try_get("name")?,
             enabled: enabled_int != 0,

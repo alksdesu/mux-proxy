@@ -27,8 +27,8 @@ pub async fn insert_error(db: &Db, input: ErrorLogInput) -> AppResult<i64> {
     .fetch_one(db.pool())
     .await?;
 
-    let id: i32 = row.try_get("id")?;
-    Ok(id as i64)
+    let id: i64 = row.try_get("id")?;
+    Ok(id)
 }
 
 pub async fn cleanup_old_errors(db: &Db, key_name: &str) -> AppResult<()> {
@@ -103,7 +103,7 @@ pub async fn get_error_by_id(db: &Db, id: i64) -> AppResult<Option<ErrorLog>> {
         "SELECT id, time, key_name, status, path, model, request_body, response_body, ip, channel_kind \
          FROM error_logs WHERE id = $1",
     )
-    .bind(id as i32)
+    .bind(id)
     .fetch_optional(db.pool())
     .await?;
     Ok(row)

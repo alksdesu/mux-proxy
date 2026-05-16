@@ -23,7 +23,7 @@ pub async fn find_by_id(db: &Db, id: i64) -> AppResult<Option<ApiKey>> {
         "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, created_at, channel_kind \
          FROM api_keys WHERE id = $1",
     )
-    .bind(id as i32)
+    .bind(id)
     .fetch_optional(db.pool())
     .await?;
     Ok(row)
@@ -111,7 +111,7 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
         "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, created_at, channel_kind \
          FROM api_keys WHERE id = $1",
     )
-    .bind(id as i32)
+    .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -186,7 +186,7 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
     if let Some(ch) = patch.channel_kind {
         q = q.bind(ch.as_str());
     }
-    q = q.bind(id as i32);
+    q = q.bind(id);
 
     let updated = q.fetch_one(&mut *tx).await?;
 
@@ -209,7 +209,7 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
 
 pub async fn delete(db: &Db, id: i64) -> AppResult<Option<String>> {
     let row = sqlx::query("DELETE FROM api_keys WHERE id = $1 RETURNING name")
-        .bind(id as i32)
+        .bind(id)
         .fetch_optional(db.pool())
         .await?;
     Ok(row.map(|r| r.get::<String, _>("name")))

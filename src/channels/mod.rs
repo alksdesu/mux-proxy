@@ -13,6 +13,17 @@ pub enum ChannelKind {
     Anthropic,
 }
 
+/// 上游 key 熔断状态快照。两条渠道返回同一形状，admin/ws 不再做 wire 类型转换。
+#[derive(Clone, Debug, Serialize)]
+pub struct BreakerSnapshot {
+    pub id: i64,
+    pub channel_kind: ChannelKind,
+    pub count: u32,
+    pub disabled: bool,
+    pub first_at_ms_ago: u128,
+    pub last_at_ms_ago: u128,
+}
+
 impl ChannelKind {
     pub fn as_str(&self) -> &'static str {
         match self {

@@ -1,6 +1,7 @@
 //! 上游 key 429 累计熔断（重置式固定窗口）。窗口内累计达阈值 disable，过 recover 自动恢复。
 //! threshold/window/recover 与旧 TS 版一致便于灰度观测；TS 版也是重置式不是真滑动窗口。
 
+use crate::channels::{BreakerSnapshot, ChannelKind};
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
 
@@ -14,15 +15,6 @@ struct Entry {
     first_at: Instant,
     last_at: Instant,
     disabled_at: Option<Instant>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct BreakerSnapshot {
-    pub id: i64,
-    pub count: u32,
-    pub disabled: bool,
-    pub first_at_ms_ago: u128,
-    pub last_at_ms_ago: u128,
 }
 
 pub struct Breaker {
@@ -111,7 +103,6 @@ impl Breaker {
             });
     }
 
-    /// dashboard / admin 接口用的状态快照。
     pub fn snapshot(&self) -> Vec<BreakerSnapshot> {
         let now = Instant::now();
         self.inner
@@ -120,6 +111,7 @@ impl Breaker {
                 let e = kv.value();
                 BreakerSnapshot {
                     id: *kv.key(),
+                    channel_kind: ChannelKind::Copilot,
                     count: e.count,
                     disabled: e.disabled_at.is_some(),
                     first_at_ms_ago: now.duration_since(e.first_at).as_millis(),

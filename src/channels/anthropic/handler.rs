@@ -65,8 +65,9 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         .unwrap_or("")
         .to_string();
     let client_model = extract_client_model(&req.body, &content_type);
+    // 在 rewrite 改字节前保存客户端原始 body 用于计费/审计日志，超 256KB 截断避免内存膨胀。
+    let request_body_for_log = body_for_log(&req.body);
     let outcome = rewrite_body(req.body, &content_type, &ctx.rewrite_rules);
-    let request_body_for_log = String::new();
     let rewritten_marker = outcome.rewritten();
     let original_model = outcome.original_model.clone();
     let new_model = outcome.new_model.clone();
@@ -391,6 +392,19 @@ async fn collect_with_cap(
         }
     }
     Ok(buf.freeze())
+}
+
+/// 请求体日志最大保留字节数，超出截断尾部。和 anthropic 单条响应 buffer 上限保持同数量级，
+/// 防止超大 prompt 撑爆 PG 单行存储。
+pub const REQUEST_BODY_LOG_LIMIT: usize = 256 * 1024;
+
+fn body_for_log(bytes: &Bytes) -> String {
+    let slice = if bytes.len() > REQUEST_BODY_LOG_LIMIT {
+        &bytes[..REQUEST_BODY_LOG_LIMIT]
+    } else {
+        &bytes[..]
+    };
+    String::from_utf8_lossy(slice).into_owned()
 }
 
 #[cfg(test)]

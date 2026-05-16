@@ -27,9 +27,9 @@ pub const COPILOT_OPUS_FAST: PriceRate = PriceRate::new(30.0, 150.0, 37.50, 3.00
 pub const COPILOT_SONNET: PriceRate = PriceRate::new(3.0, 15.0, 3.75, 0.30);
 pub const COPILOT_HAIKU: PriceRate = PriceRate::new(1.0, 5.0, 1.25, 0.10);
 
-pub const ANTHROPIC_OPUS: PriceRate = PriceRate::new(15.0, 75.0, 18.75, 1.50);
+pub const ANTHROPIC_OPUS: PriceRate = PriceRate::new(5.0, 25.0, 6.25, 0.50);
 pub const ANTHROPIC_SONNET: PriceRate = PriceRate::new(3.0, 15.0, 3.75, 0.30);
-pub const ANTHROPIC_HAIKU: PriceRate = PriceRate::new(0.80, 4.0, 1.0, 0.08);
+pub const ANTHROPIC_HAIKU: PriceRate = PriceRate::new(1.0, 5.0, 1.25, 0.10);
 
 /// Copilot 模型映射：复刻 proxy.ts getModelRate。fast 后缀在 sonnet/haiku 没有特殊价，
 /// 仅 opus 区分标准/fast。
@@ -155,17 +155,15 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_opus_higher_than_copilot() {
-        let copilot = calc_cost(&rec_for("claude-opus-4.6", ChannelKind::Copilot));
+    fn anthropic_opus_equals_official_rate() {
         let direct = calc_cost(&rec_for("claude-opus-4.6", ChannelKind::Anthropic));
-        assert!(direct > copilot);
-        assert!((direct - 90.0).abs() < 1e-9);
+        assert!((direct - 30.0).abs() < 1e-9);
     }
 
     #[test]
-    fn anthropic_haiku_cheaper() {
+    fn anthropic_haiku_official_rate() {
         let cost = calc_cost(&rec_for("claude-haiku-4.5", ChannelKind::Anthropic));
-        assert!((cost - 4.8).abs() < 1e-9);
+        assert!((cost - 6.0).abs() < 1e-9);
     }
 
     #[test]

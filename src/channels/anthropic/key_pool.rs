@@ -2,8 +2,8 @@
 //! 阈值 5 次 / 300s 窗口 / 900s 自动恢复，比 Copilot 渠道宽松。
 //! DB 加载走 60s TTL + ``UpstreamChangeNotifier`` 信号触发即时重载。
 
-use crate::channels::ChannelKind;
 use crate::channels::anthropic::upstream_key;
+use crate::channels::{BreakerSnapshot, ChannelKind};
 use crate::db::Db;
 use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
@@ -202,6 +202,53 @@ impl KeyPool {
 
     pub fn notifier(&self) -> &UpstreamChangeNotifier {
         &self.notifier
+    }
+
+    pub fn snapshot_breakers(&self) -> Vec<BreakerSnapshot> {
+        let guard = self.inner.lock();
+        let now = Instant::now();
+        guard
+            .breakers
+            .iter()
+            .filter_map(|(id, e)| {
+                let disabled = matches!(e.open_until, Some(d) if now < d);
+                if !disabled && e.failure_times.is_empty() {
+                    return None;
+                }
+                let (count, anchor) = if disabled {
+                    let trip = e.open_until.and_then(|d| d.checked_sub(BREAKER_RECOVER)).unwrap_or(now);
+                    (BREAKER_THRESHOLD, (trip, trip))
+                } else {
+                    let first = e.failure_times.first().copied().unwrap_or(now);
+                    let last = e.failure_times.last().copied().unwrap_or(now);
+                    (e.failure_times.len() as u32, (first, last))
+                };
+                Some(BreakerSnapshot {
+                    id: *id,
+                    channel_kind: ChannelKind::Anthropic,
+                    count,
+                    disabled,
+                    first_at_ms_ago: now.checked_duration_since(anchor.0).unwrap_or_default().as_millis(),
+                    last_at_ms_ago: now.checked_duration_since(anchor.1).unwrap_or_default().as_millis(),
+                })
+            })
+            .collect()
+    }
+
+    /// admin 手动恢复：清掉指定 key 的失败计数与 open_until。
+    pub fn reset_breaker(&self, key_id: i64) {
+        let mut guard = self.inner.lock();
+        if let Some(entry) = guard.breakers.get_mut(&key_id) {
+            entry.reset();
+        }
+    }
+
+    /// admin 手动熔断：把指定 key 强制置为 open，``BREAKER_RECOVER`` 后自动恢复。
+    pub fn force_disable_breaker(&self, key_id: i64) {
+        let mut guard = self.inner.lock();
+        let entry = guard.breakers.entry(key_id).or_default();
+        entry.open_until = Some(Instant::now() + BREAKER_RECOVER);
+        entry.failure_times.clear();
     }
 
     /// 集成测试用：跳过 DB 加载，把 keys 直接塞进 inner state，

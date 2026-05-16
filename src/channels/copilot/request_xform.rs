@@ -439,7 +439,8 @@ pub fn transform_request_body(
     // step 7：非 4.7 路径 effort max → high
     downgrade_effort_max(payload);
 
-    // step 8：Opus 4.7 采样硬拒（在 model 还原后再做）
+    // step 8：Opus 4.7 采样硬拒。top_p/top_k 在 step 1 已被 strip，本次实际只检 temperature；
+    // top_p/top_k 的拒绝由 handler.rs 在 transform 之前的预校验完成（在原始 payload 上）。
     opus47_rejects_sampling(payload)?;
 
     // step 9：cleanCacheControl 三处
