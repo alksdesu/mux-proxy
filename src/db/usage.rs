@@ -11,12 +11,72 @@ pub use crate::db::errors::{cleanup_old_errors, insert_error};
 
 pub const USAGE_LOG_LIMIT: i64 = 500;
 
+// `query_as` 拿到的 SQL 是 `&str` 引用，必须 `'static` 生命周期跨越 BoxStream；
+// 若用 `format!` 拼接 const 字段名，临时 String 会立刻 drop。直接展开字面量更稳。
+const SELECT_BY_KEY_CHANNEL: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE key_name = $1 AND channel_kind = $2 \
+     ORDER BY id DESC LIMIT $3 OFFSET $4";
+
+const SELECT_BY_KEY: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE key_name = $1 \
+     ORDER BY id DESC LIMIT $2 OFFSET $3";
+
+const SELECT_BY_CHANNEL: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE channel_kind = $1 \
+     ORDER BY id DESC LIMIT $2 OFFSET $3";
+
+const SELECT_ALL: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs ORDER BY id DESC LIMIT $1 OFFSET $2";
+
+const SELECT_BY_ID: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE id = $1";
+
+const EXPORT_BY_KEY_CHANNEL: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE key_name = $1 AND channel_kind = $2 ORDER BY id DESC";
+
+const EXPORT_BY_KEY: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE key_name = $1 ORDER BY id DESC";
+
+const EXPORT_BY_CHANNEL: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs WHERE channel_kind = $1 ORDER BY id DESC";
+
+const EXPORT_ALL: &str =
+    "SELECT id, time, model, input_tokens, output_tokens, \
+            cache_creation_tokens, cache_creation_5m_tokens, cache_creation_1h_tokens, \
+            cache_read_tokens, key_name, request_body, ip, cost_usd, channel_kind \
+     FROM usage_logs ORDER BY id DESC";
+
 pub async fn insert_usage(db: &Db, rec: UsageLogInput) -> AppResult<i64> {
     let row = sqlx::query(
         "INSERT INTO usage_logs \
-            (time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
+            (time, model, input_tokens, output_tokens, cache_creation_tokens, \
+             cache_creation_5m_tokens, cache_creation_1h_tokens, cache_read_tokens, \
              key_name, request_body, ip, cost_usd, channel_kind) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
          RETURNING id",
     )
     .bind(&rec.time)
@@ -24,6 +84,8 @@ pub async fn insert_usage(db: &Db, rec: UsageLogInput) -> AppResult<i64> {
     .bind(rec.input_tokens)
     .bind(rec.output_tokens)
     .bind(rec.cache_creation_tokens)
+    .bind(rec.cache_creation_5m_tokens)
+    .bind(rec.cache_creation_1h_tokens)
     .bind(rec.cache_read_tokens)
     .bind(&rec.key_name)
     .bind(&rec.request_body)
@@ -62,60 +124,38 @@ pub async fn list_usage(
     offset: i64,
 ) -> AppResult<Vec<UsageLog>> {
     match (key, channel) {
-        (Some(k), Some(c)) => Ok(sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs WHERE key_name = $1 AND channel_kind = $2 \
-             ORDER BY id DESC LIMIT $3 OFFSET $4",
-        )
-        .bind(k)
-        .bind(c.as_str())
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(db.pool())
-        .await?),
-        (Some(k), None) => Ok(sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs WHERE key_name = $1 \
-             ORDER BY id DESC LIMIT $2 OFFSET $3",
-        )
-        .bind(k)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(db.pool())
-        .await?),
-        (None, Some(c)) => Ok(sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs WHERE channel_kind = $1 \
-             ORDER BY id DESC LIMIT $2 OFFSET $3",
-        )
-        .bind(c.as_str())
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(db.pool())
-        .await?),
-        (None, None) => Ok(sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs ORDER BY id DESC LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(db.pool())
-        .await?),
+        (Some(k), Some(c)) => Ok(sqlx::query_as::<_, UsageLog>(SELECT_BY_KEY_CHANNEL)
+            .bind(k)
+            .bind(c.as_str())
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(db.pool())
+            .await?),
+        (Some(k), None) => Ok(sqlx::query_as::<_, UsageLog>(SELECT_BY_KEY)
+            .bind(k)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(db.pool())
+            .await?),
+        (None, Some(c)) => Ok(sqlx::query_as::<_, UsageLog>(SELECT_BY_CHANNEL)
+            .bind(c.as_str())
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(db.pool())
+            .await?),
+        (None, None) => Ok(sqlx::query_as::<_, UsageLog>(SELECT_ALL)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(db.pool())
+            .await?),
     }
 }
 
 pub async fn get_usage_by_id(db: &Db, id: i64) -> AppResult<Option<UsageLog>> {
-    let row = sqlx::query_as::<_, UsageLog>(
-        "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                key_name, request_body, ip, cost_usd, channel_kind FROM usage_logs WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(db.pool())
-    .await?;
+    let row = sqlx::query_as::<_, UsageLog>(SELECT_BY_ID)
+        .bind(id)
+        .fetch_optional(db.pool())
+        .await?;
     Ok(row)
 }
 
@@ -125,33 +165,16 @@ pub fn export_usage_stream<'a>(
     channel: Option<ChannelKind>,
 ) -> BoxStream<'a, Result<UsageLog, sqlx::Error>> {
     match (key, channel) {
-        (Some(k), Some(c)) => sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs WHERE key_name = $1 AND channel_kind = $2 ORDER BY id DESC",
-        )
-        .bind(k)
-        .bind(c.as_str())
-        .fetch(db.pool()),
-        (Some(k), None) => sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs WHERE key_name = $1 ORDER BY id DESC",
-        )
-        .bind(k)
-        .fetch(db.pool()),
-        (None, Some(c)) => sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs WHERE channel_kind = $1 ORDER BY id DESC",
-        )
-        .bind(c.as_str())
-        .fetch(db.pool()),
-        (None, None) => sqlx::query_as::<_, UsageLog>(
-            "SELECT id, time, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
-                    key_name, request_body, ip, cost_usd, channel_kind \
-             FROM usage_logs ORDER BY id DESC",
-        )
-        .fetch(db.pool()),
+        (Some(k), Some(c)) => sqlx::query_as::<_, UsageLog>(EXPORT_BY_KEY_CHANNEL)
+            .bind(k)
+            .bind(c.as_str())
+            .fetch(db.pool()),
+        (Some(k), None) => sqlx::query_as::<_, UsageLog>(EXPORT_BY_KEY)
+            .bind(k)
+            .fetch(db.pool()),
+        (None, Some(c)) => sqlx::query_as::<_, UsageLog>(EXPORT_BY_CHANNEL)
+            .bind(c.as_str())
+            .fetch(db.pool()),
+        (None, None) => sqlx::query_as::<_, UsageLog>(EXPORT_ALL).fetch(db.pool()),
     }
 }

@@ -73,12 +73,15 @@ impl UsageWriter {
         let counters = self.usage_cleanup_counters.clone();
 
         tokio::spawn(async move {
+            let cache_total = rec.cache_creation_total();
             let input = UsageLogInput {
                 time: Utc::now().to_rfc3339(),
                 model: rec.model.clone(),
                 input_tokens: rec.input_tokens as i64,
                 output_tokens: rec.output_tokens as i64,
-                cache_creation_tokens: rec.cache_creation_tokens as i64,
+                cache_creation_tokens: cache_total as i64,
+                cache_creation_5m_tokens: rec.cache_creation_5m_tokens as i64,
+                cache_creation_1h_tokens: rec.cache_creation_1h_tokens as i64,
                 cache_read_tokens: rec.cache_read_tokens as i64,
                 key_name: rec.key_name.clone(),
                 request_body: rec.request_body.clone(),

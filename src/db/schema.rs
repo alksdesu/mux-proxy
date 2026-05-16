@@ -62,7 +62,10 @@ pub struct UsageLog {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// 5m + 1h 总和。旧字段保留兼容旧客户端；新明细看下面两列。
     pub cache_creation_tokens: i64,
+    pub cache_creation_5m_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
     pub cache_read_tokens: i64,
     pub key_name: String,
     pub request_body: String,
@@ -80,6 +83,9 @@ impl<'r> sqlx::FromRow<'r, PgRow> for UsageLog {
             input_tokens: row.try_get("input_tokens")?,
             output_tokens: row.try_get("output_tokens")?,
             cache_creation_tokens: row.try_get("cache_creation_tokens")?,
+            // migration 007 之前的行没有这两列；try_get 失败 unwrap_or(0) 兼容历史 fixture。
+            cache_creation_5m_tokens: row.try_get("cache_creation_5m_tokens").unwrap_or(0),
+            cache_creation_1h_tokens: row.try_get("cache_creation_1h_tokens").unwrap_or(0),
             cache_read_tokens: row.try_get("cache_read_tokens")?,
             key_name: row.try_get("key_name")?,
             request_body: row.try_get::<Option<String>, _>("request_body")?.unwrap_or_default(),
@@ -96,7 +102,10 @@ pub struct UsageLogInput {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// 5m + 1h 总和。usage_writer 写入时由 5m_tokens + 1h_tokens 派生，无需调用方手填。
     pub cache_creation_tokens: i64,
+    pub cache_creation_5m_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
     pub cache_read_tokens: i64,
     pub key_name: String,
     pub request_body: String,

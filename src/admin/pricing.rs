@@ -28,7 +28,10 @@ pub struct ChannelPricing {
 pub struct PriceView {
     pub input: f64,
     pub output: f64,
+    /// 兼容旧 dashboard：等于 ``cache_write_5m``。新前端应直接读 ``cache_write_5m / _1h``。
     pub cache_write: f64,
+    pub cache_write_5m: f64,
+    pub cache_write_1h: f64,
     pub cache_read: f64,
 }
 
@@ -37,7 +40,9 @@ impl From<PriceRate> for PriceView {
         Self {
             input: r.input,
             output: r.output,
-            cache_write: r.cache_write,
+            cache_write: r.cache_write_5m,
+            cache_write_5m: r.cache_write_5m,
+            cache_write_1h: r.cache_write_1h,
             cache_read: r.cache_read,
         }
     }

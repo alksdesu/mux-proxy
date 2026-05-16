@@ -307,7 +307,9 @@ mod tests {
 
         assert!(agg.seen_message_start(), "must see message_start regardless of splice");
         assert_eq!(agg.input_tokens(), 42);
-        assert_eq!(agg.cache_creation_tokens(), 5);
+        // 上游只给顶层 cache_creation_input_tokens 总和 → 全归 5m，1h=0
+        assert_eq!(agg.cache_creation_5m_tokens(), 5);
+        assert_eq!(agg.cache_creation_1h_tokens(), 0);
         assert_eq!(agg.cache_read_tokens(), 3);
         assert_eq!(agg.output_tokens(), 17);
         assert_eq!(agg.model(), Some("claude-haiku"));

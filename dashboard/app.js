@@ -235,7 +235,17 @@ function renderCharts(stats, ts) {
     const b = row.bucket;
     if (!bucketMap[b]) bucketMap[b] = { requests: 0, cost: 0 };
     bucketMap[b].requests += row.requests;
-    bucketMap[b].cost += calcCostClient(row.model, row.input_tokens, row.output_tokens, row.cache_creation_tokens, row.cache_read_tokens, row.channel_kind);
+    // timeseries 后端只 SUM 总 cache_creation_tokens，没拆 5m/1h；
+    // 按 5m 估算重算（准确账以 row.cost_usd 列为准，本路径只用于折线图近似）。
+    bucketMap[b].cost += calcCostClient(
+      row.model,
+      row.input_tokens,
+      row.output_tokens,
+      row.cache_creation_tokens,
+      0,
+      row.cache_read_tokens,
+      row.channel_kind,
+    );
   }
   const buckets = Object.keys(bucketMap).sort();
   const labels = buckets.map(b => fmtTime(b.endsWith('Z') ? b : b + 'Z'));
@@ -653,7 +663,15 @@ function renderKeyHistory() {
 
     let cost = '';
     if (!isErr) {
-      const c = calcCostClient(r.model, r.input_tokens, r.output_tokens, r.cache_creation_tokens||0, r.cache_read_tokens||0, r.channel_kind);
+      const c = calcCostClient(
+        r.model,
+        r.input_tokens,
+        r.output_tokens,
+        r.cache_creation_5m_tokens || 0,
+        r.cache_creation_1h_tokens || 0,
+        r.cache_read_tokens || 0,
+        r.channel_kind,
+      );
       cost = '$' + c.toFixed(4);
     }
 
@@ -788,7 +806,15 @@ async function loadUsage() {
 function renderUsage(rows) {
   const tbody = document.getElementById('usage-tbody');
   tbody.innerHTML = rows.map((r, i) => {
-    const cost = calcCostClient(r.model, r.input_tokens, r.output_tokens, r.cache_creation_tokens, r.cache_read_tokens, r.channel_kind);
+    const cost = calcCostClient(
+      r.model,
+      r.input_tokens,
+      r.output_tokens,
+      r.cache_creation_5m_tokens || 0,
+      r.cache_creation_1h_tokens || 0,
+      r.cache_read_tokens,
+      r.channel_kind,
+    );
     return `<tr style="cursor:pointer" onclick="toggleUsageExpand(${r.id}, 'usage-expand-${i}')">
       <td style="width:20px;color:var(--text-muted)">+</td>
       <td class="mono" style="font-size:11px">${fmtTime(r.time)}</td>
@@ -1445,15 +1471,15 @@ function isFast(m) { return (m || '').toLowerCase().includes('fast'); }
 let PRICING_CACHE = null;
 const PRICING_FALLBACK = {
   copilot: {
-    opus:      { input: 5,  output: 25,  cache_write: 6.25,  cache_read: 0.5 },
-    opus_fast: { input: 30, output: 150, cache_write: 37.5,  cache_read: 3 },
-    sonnet:    { input: 3,  output: 15,  cache_write: 3.75,  cache_read: 0.3 },
-    haiku:     { input: 1,  output: 5,   cache_write: 1.25,  cache_read: 0.1 },
+    opus:      { input: 5,  output: 25,  cache_write_5m: 6.25,  cache_write_1h: 6.25,  cache_read: 0.5 },
+    opus_fast: { input: 30, output: 150, cache_write_5m: 37.5,  cache_write_1h: 37.5,  cache_read: 3 },
+    sonnet:    { input: 3,  output: 15,  cache_write_5m: 3.75,  cache_write_1h: 3.75,  cache_read: 0.3 },
+    haiku:     { input: 1,  output: 5,   cache_write_5m: 1.25,  cache_write_1h: 1.25,  cache_read: 0.1 },
   },
   anthropic: {
-    opus:      { input: 5,  output: 25,  cache_write: 6.25,  cache_read: 0.5 },
-    sonnet:    { input: 3,  output: 15,  cache_write: 3.75,  cache_read: 0.3 },
-    haiku:     { input: 1,  output: 5,   cache_write: 1.25,  cache_read: 0.1 },
+    opus:      { input: 5,  output: 25,  cache_write_5m: 6.25,  cache_write_1h: 10.0,  cache_read: 0.5 },
+    sonnet:    { input: 3,  output: 15,  cache_write_5m: 3.75,  cache_write_1h: 6.0,   cache_read: 0.3 },
+    haiku:     { input: 1,  output: 5,   cache_write_5m: 1.25,  cache_write_1h: 2.0,   cache_read: 0.1 },
   },
 };
 
@@ -1475,9 +1501,26 @@ function getClientRate(model, channelKind) {
   return table.opus;
 }
 
-function calcCostClient(model, inp, outp, cw, cr, channelKind) {
-  const r = getClientRate(model, channelKind);
-  return (inp/1e6)*r.input + (outp/1e6)*r.output + (cw/1e6)*r.cache_write + (cr/1e6)*r.cache_read;
+// Anthropic 区分 5m / 1h cache write；Copilot 两个价相同。
+// 旧调用方式 calcCostClient(model, inp, outp, cw, cr, channel) 仍兼容，
+// 整段 cw 按 5m 计费（与旧版行为一致）。
+function calcCostClient(model, inp, outp, cw5m, cw1hOrCr, crOrChannel, channelMaybe) {
+  const r = getClientRate(model, arguments.length >= 7 ? channelMaybe : crOrChannel);
+  let cache5m, cache1h, cacheRead;
+  if (arguments.length >= 7) {
+    cache5m = cw5m || 0;
+    cache1h = cw1hOrCr || 0;
+    cacheRead = crOrChannel || 0;
+  } else {
+    cache5m = cw5m || 0;
+    cache1h = 0;
+    cacheRead = cw1hOrCr || 0;
+  }
+  return (inp/1e6) * r.input
+       + (outp/1e6) * r.output
+       + (cache5m/1e6) * r.cache_write_5m
+       + (cache1h/1e6) * r.cache_write_1h
+       + (cacheRead/1e6) * r.cache_read;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

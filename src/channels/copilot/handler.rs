@@ -441,6 +441,8 @@ impl CopilotHandler {
                     .stream_model
                     .clone()
                     .unwrap_or_else(|| "unknown".into());
+                // Copilot 上游不暴露 1h cache 概念，所有 cache_creation 一律塞进 5m 字段，
+                // PriceRate 里 cache_write_5m == cache_write_1h，行为同旧版单一 cache_write。
                 if let Some(final_u) = stats.final_usage.clone() {
                     writer.record(BillingRecord {
                         channel: ChannelKind::Copilot,
@@ -448,7 +450,8 @@ impl CopilotHandler {
                         key_name: key_name.clone(),
                         input_tokens: final_u.input_tokens,
                         output_tokens: final_u.output_tokens,
-                        cache_creation_tokens: final_u.cache_creation_tokens,
+                        cache_creation_5m_tokens: final_u.cache_creation_tokens,
+                        cache_creation_1h_tokens: 0,
                         cache_read_tokens: final_u.cache_read_tokens,
                         request_body: request_body_text.clone(),
                         ip: Some(client_ip.clone()),
@@ -460,7 +463,8 @@ impl CopilotHandler {
                         key_name: key_name.clone(),
                         input_tokens: partial.input_tokens,
                         output_tokens: partial.output_tokens,
-                        cache_creation_tokens: partial.cache_creation_tokens,
+                        cache_creation_5m_tokens: partial.cache_creation_tokens,
+                        cache_creation_1h_tokens: 0,
                         cache_read_tokens: partial.cache_read_tokens,
                         request_body: request_body_text.clone(),
                         ip: Some(client_ip.clone()),
@@ -687,7 +691,9 @@ fn record_usage_for_billing(
         key_name: ctx.key.name.clone(),
         input_tokens: token(usage, "input_tokens"),
         output_tokens: token(usage, "output_tokens"),
-        cache_creation_tokens: token(usage, "cache_creation_input_tokens"),
+        // Copilot 上游不暴露 1h 概念，所有 cache_creation 一律塞进 5m 字段。
+        cache_creation_5m_tokens: token(usage, "cache_creation_input_tokens"),
+        cache_creation_1h_tokens: 0,
         cache_read_tokens: token(usage, "cache_read_input_tokens"),
         request_body: String::from_utf8(ctx.body.to_vec()).unwrap_or_default(),
         ip: Some(ctx.client_ip.clone()),

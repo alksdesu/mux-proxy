@@ -1,4 +1,7 @@
 //! 按 (渠道, 模型) 索引的价格常量 + cost 计算。
+//! Anthropic 官方区分 5m / 1h cache write（1.25× vs 2.0× 输入价），ephemeral_5m_input_tokens
+//! 和 ephemeral_1h_input_tokens 在响应 usage.cache_creation 子对象里分项给出。
+//! Copilot 上游不暴露 1h 概念，``cache_write_1h`` 与 ``cache_write_5m`` 同值，相当于全部按 5m 计。
 //! 调价改下面的 PriceRate 常量即可，热路径不命中此模块。
 
 use crate::channels::ChannelKind;
@@ -7,29 +10,42 @@ use crate::channels::ChannelKind;
 pub struct PriceRate {
     pub input: f64,
     pub output: f64,
-    pub cache_write: f64,
+    /// 5 分钟 TTL 的 cache write 价（Anthropic：1.25 × input）
+    pub cache_write_5m: f64,
+    /// 1 小时 TTL 的 cache write 价（Anthropic：2.0 × input）。
+    /// Copilot 渠道不暴露该维度，与 ``cache_write_5m`` 同值。
+    pub cache_write_1h: f64,
     pub cache_read: f64,
 }
 
 impl PriceRate {
-    pub const fn new(input: f64, output: f64, cache_write: f64, cache_read: f64) -> Self {
+    pub const fn new(
+        input: f64,
+        output: f64,
+        cache_write_5m: f64,
+        cache_write_1h: f64,
+        cache_read: f64,
+    ) -> Self {
         Self {
             input,
             output,
-            cache_write,
+            cache_write_5m,
+            cache_write_1h,
             cache_read,
         }
     }
 }
 
-pub const COPILOT_OPUS: PriceRate = PriceRate::new(5.0, 25.0, 6.25, 0.50);
-pub const COPILOT_OPUS_FAST: PriceRate = PriceRate::new(30.0, 150.0, 37.50, 3.00);
-pub const COPILOT_SONNET: PriceRate = PriceRate::new(3.0, 15.0, 3.75, 0.30);
-pub const COPILOT_HAIKU: PriceRate = PriceRate::new(1.0, 5.0, 1.25, 0.10);
+// Copilot：上游不暴露 1h 概念，5m / 1h 同价，行为同旧版单一 cache_write。
+pub const COPILOT_OPUS: PriceRate = PriceRate::new(5.0, 25.0, 6.25, 6.25, 0.50);
+pub const COPILOT_OPUS_FAST: PriceRate = PriceRate::new(30.0, 150.0, 37.50, 37.50, 3.00);
+pub const COPILOT_SONNET: PriceRate = PriceRate::new(3.0, 15.0, 3.75, 3.75, 0.30);
+pub const COPILOT_HAIKU: PriceRate = PriceRate::new(1.0, 5.0, 1.25, 1.25, 0.10);
 
-pub const ANTHROPIC_OPUS: PriceRate = PriceRate::new(5.0, 25.0, 6.25, 0.50);
-pub const ANTHROPIC_SONNET: PriceRate = PriceRate::new(3.0, 15.0, 3.75, 0.30);
-pub const ANTHROPIC_HAIKU: PriceRate = PriceRate::new(1.0, 5.0, 1.25, 0.10);
+// Anthropic 官方 2026-05：5m=1.25×input、1h=2.0×input、cache hit=0.1×input。
+pub const ANTHROPIC_OPUS: PriceRate = PriceRate::new(5.0, 25.0, 6.25, 10.0, 0.50);
+pub const ANTHROPIC_SONNET: PriceRate = PriceRate::new(3.0, 15.0, 3.75, 6.0, 0.30);
+pub const ANTHROPIC_HAIKU: PriceRate = PriceRate::new(1.0, 5.0, 1.25, 2.0, 0.10);
 
 /// Copilot 模型映射：复刻 proxy.ts getModelRate。fast 后缀在 sonnet/haiku 没有特殊价，
 /// 仅 opus 区分标准/fast。
@@ -73,10 +89,22 @@ pub struct BillingRecord {
     pub key_name: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
+    /// 5 分钟 TTL 的 cache write tokens（Anthropic ephemeral_5m_input_tokens）。
+    /// 没区分 ttl 的上游（Copilot）一律填到这里。
+    pub cache_creation_5m_tokens: u64,
+    /// 1 小时 TTL 的 cache write tokens（Anthropic ephemeral_1h_input_tokens）。
+    pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
     pub request_body: String,
     pub ip: Option<String>,
+}
+
+impl BillingRecord {
+    /// 5m + 1h 总和。供 DB 旧列 cache_creation_tokens 和 dashboard 汇总展示用。
+    pub fn cache_creation_total(&self) -> u64 {
+        self.cache_creation_5m_tokens
+            .saturating_add(self.cache_creation_1h_tokens)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,9 +112,17 @@ pub struct CostBreakdown {
     pub total: f64,
     pub input_cost: f64,
     pub output_cost: f64,
-    pub cache_write_cost: f64,
+    pub cache_write_5m_cost: f64,
+    pub cache_write_1h_cost: f64,
     pub cache_read_cost: f64,
     pub cache_saved: f64,
+}
+
+impl CostBreakdown {
+    /// 5m + 1h 两路 cache write 合计，方便 dashboard 单列展示。
+    pub fn cache_write_cost(&self) -> f64 {
+        self.cache_write_5m_cost + self.cache_write_1h_cost
+    }
 }
 
 const TOKENS_PER_MILLION: f64 = 1_000_000.0;
@@ -94,15 +130,19 @@ const TOKENS_PER_MILLION: f64 = 1_000_000.0;
 pub fn breakdown(rate: PriceRate, rec: &BillingRecord) -> CostBreakdown {
     let input_cost = rec.input_tokens as f64 / TOKENS_PER_MILLION * rate.input;
     let output_cost = rec.output_tokens as f64 / TOKENS_PER_MILLION * rate.output;
-    let cache_write_cost = rec.cache_creation_tokens as f64 / TOKENS_PER_MILLION * rate.cache_write;
+    let cache_write_5m_cost =
+        rec.cache_creation_5m_tokens as f64 / TOKENS_PER_MILLION * rate.cache_write_5m;
+    let cache_write_1h_cost =
+        rec.cache_creation_1h_tokens as f64 / TOKENS_PER_MILLION * rate.cache_write_1h;
     let cache_read_cost = rec.cache_read_tokens as f64 / TOKENS_PER_MILLION * rate.cache_read;
     let cache_saved =
         rec.cache_read_tokens as f64 / TOKENS_PER_MILLION * (rate.input - rate.cache_read);
     CostBreakdown {
-        total: input_cost + output_cost + cache_write_cost + cache_read_cost,
+        total: input_cost + output_cost + cache_write_5m_cost + cache_write_1h_cost + cache_read_cost,
         input_cost,
         output_cost,
-        cache_write_cost,
+        cache_write_5m_cost,
+        cache_write_1h_cost,
         cache_read_cost,
         cache_saved,
     }
@@ -123,7 +163,8 @@ mod tests {
             key_name: "test".into(),
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
-            cache_creation_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             request_body: String::new(),
             ip: None,
@@ -167,19 +208,69 @@ mod tests {
     }
 
     #[test]
-    fn cache_breakdown_components() {
-        let mut rec = rec_for("claude-sonnet-4.6", ChannelKind::Copilot);
-        rec.cache_creation_tokens = 1_000_000;
+    fn cache_breakdown_5m_only_components() {
+        let mut rec = rec_for("claude-sonnet-4.6", ChannelKind::Anthropic);
+        rec.cache_creation_5m_tokens = 1_000_000;
         rec.cache_read_tokens = 1_000_000;
         let br = breakdown(rate_for(rec.channel, &rec.model), &rec);
-        assert!((br.cache_write_cost - 3.75).abs() < 1e-9);
+        assert!((br.cache_write_5m_cost - 3.75).abs() < 1e-9);
+        assert!((br.cache_write_1h_cost - 0.0).abs() < 1e-9);
         assert!((br.cache_read_cost - 0.30).abs() < 1e-9);
         assert!((br.cache_saved - (3.0 - 0.30)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn anthropic_1h_cache_write_is_2x_input() {
+        let mut rec = rec_for("claude-opus-4.7", ChannelKind::Anthropic);
+        rec.input_tokens = 0;
+        rec.output_tokens = 0;
+        rec.cache_creation_1h_tokens = 1_000_000;
+        let br = breakdown(rate_for(rec.channel, &rec.model), &rec);
+        assert!((br.cache_write_1h_cost - 10.0).abs() < 1e-9, "opus 1h = $10/MTok");
+        assert!((br.total - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn anthropic_mixed_5m_and_1h_sum() {
+        let mut rec = rec_for("claude-sonnet-4.6", ChannelKind::Anthropic);
+        rec.input_tokens = 0;
+        rec.output_tokens = 0;
+        rec.cache_creation_5m_tokens = 1_000_000;
+        rec.cache_creation_1h_tokens = 1_000_000;
+        let br = breakdown(rate_for(rec.channel, &rec.model), &rec);
+        // sonnet: 5m=$3.75, 1h=$6 → total $9.75
+        assert!((br.cache_write_5m_cost - 3.75).abs() < 1e-9);
+        assert!((br.cache_write_1h_cost - 6.0).abs() < 1e-9);
+        assert!((br.total - 9.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn copilot_5m_and_1h_collapse_to_same_rate() {
+        // Copilot 上游不暴露 1h 概念，sniffer 应该把所有 cache_creation 填进 5m；
+        // 但即便上游真的发了 1h 字段，价格也与 5m 相同，等价旧版单一 cache_write 行为。
+        let mut rec = rec_for("claude-opus-4.6", ChannelKind::Copilot);
+        rec.input_tokens = 0;
+        rec.output_tokens = 0;
+        rec.cache_creation_5m_tokens = 500_000;
+        rec.cache_creation_1h_tokens = 500_000;
+        let br = breakdown(rate_for(rec.channel, &rec.model), &rec);
+        // 共 1M tokens × $6.25 = $6.25
+        assert!((br.total - 6.25).abs() < 1e-9);
+        assert!((br.cache_write_5m_cost - 3.125).abs() < 1e-9);
+        assert!((br.cache_write_1h_cost - 3.125).abs() < 1e-9);
     }
 
     #[test]
     fn rate_for_routes_per_channel() {
         assert_eq!(rate_for(ChannelKind::Copilot, "opus"), COPILOT_OPUS);
         assert_eq!(rate_for(ChannelKind::Anthropic, "opus"), ANTHROPIC_OPUS);
+    }
+
+    #[test]
+    fn cache_creation_total_sums_5m_and_1h() {
+        let mut rec = rec_for("opus", ChannelKind::Anthropic);
+        rec.cache_creation_5m_tokens = 148;
+        rec.cache_creation_1h_tokens = 100;
+        assert_eq!(rec.cache_creation_total(), 248);
     }
 }
