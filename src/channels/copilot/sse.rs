@@ -1,9 +1,14 @@
-//! SSE 解析 + 清洗 + 计费提取。纯状态机：feed(chunk)/finish() 双方法。
-//! race 关键约束见 SseStats.usage_recorded 字段 doc。
+//! SSE 解析 + 清洗 + 计费提取。字节路径状态机：feed(&[u8])/finish() 双方法。
+//! buffer 是 ``BytesMut``，行边界用 ``shared::line_codec::find_line_boundary``（memchr）。
+//! UTF-8 字节不会跨 ``\n`` (0x0A) 切分（``\n`` 在多字节 UTF-8 编码里永远不出现），
+//! 所以单行可以直接 ``from_utf8_lossy`` 解码后走业务逻辑。
+//! race 关键约束见 ``SseStats::usage_recorded`` 字段 doc。
 
 use crate::channels::copilot::direct::DirectFlags;
 use crate::channels::copilot::response_xform::sanitize_sse_event;
+use crate::shared::line_codec::{find_line_boundary, strip_trailing_cr};
 use crate::shared::sse_event::{is_allowed, is_passthrough};
+use bytes::{BufMut, Bytes, BytesMut};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Default)]
@@ -34,9 +39,9 @@ pub struct SseStats {
 
 pub struct SseProcessor {
     direct: DirectFlags,
-    /// 跨 chunk 残留行（不含末尾 LF）
-    buffer: String,
-    /// 上一行 `event:` 头解析出来的类型
+    /// 跨 chunk 残留字节（不含末尾 LF）
+    buffer: BytesMut,
+    /// 上一行 ``event:`` 头解析出来的类型
     pending_event_type: String,
     stats: SseStats,
 }
@@ -45,7 +50,7 @@ impl SseProcessor {
     pub fn new(direct: DirectFlags) -> Self {
         Self {
             direct,
-            buffer: String::new(),
+            buffer: BytesMut::with_capacity(8 * 1024),
             pending_event_type: String::new(),
             stats: SseStats::default(),
         }
@@ -60,76 +65,78 @@ impl SseProcessor {
         self.stats.usage_recorded = true;
     }
 
-    /// 喂一段 chunk，返回应转发给客户端的字符串。
-    pub fn feed(&mut self, chunk: &str) -> String {
-        self.buffer.push_str(chunk);
-        let mut out = String::with_capacity(chunk.len());
-        // 按 \n 切，最后一行（无 \n 终止）留给下次拼接
-        loop {
-            let Some(idx) = self.buffer.find('\n') else {
-                break;
-            };
-            let line = self.buffer[..idx].to_string();
-            self.buffer.drain(..=idx);
-            self.process_line(&line, &mut out);
+    /// 喂一段 chunk，返回应转发给客户端的字节。``chunk`` 空也安全。
+    pub fn feed(&mut self, chunk: &[u8]) -> Bytes {
+        if !chunk.is_empty() {
+            self.buffer.extend_from_slice(chunk);
         }
-        out
+        let mut out = BytesMut::with_capacity(chunk.len());
+        while let Some((idx, dlen)) = find_line_boundary(&self.buffer) {
+            let line = self.buffer.split_to(idx + dlen);
+            // 去掉行尾 ``\n`` 与可选 ``\r``
+            let body = strip_trailing_cr(&line[..line.len() - dlen]);
+            self.process_line(body, &mut out);
+        }
+        out.freeze()
     }
 
     /// 结束流：buffer 残留也走一次 flush（保最后 chunk 落 usage）。
-    pub fn finish(&mut self) -> String {
-        let mut out = String::new();
-        if !self.buffer.trim().is_empty() {
-            let lines: Vec<String> = self.buffer.split('\n').map(|s| s.to_string()).collect();
-            self.buffer.clear();
-            for line in lines {
-                self.process_line(&line, &mut out);
+    pub fn finish(&mut self) -> Bytes {
+        let mut out = BytesMut::new();
+        if self.buffer.is_empty() {
+            return out.freeze();
+        }
+        let leftover = std::mem::take(&mut self.buffer);
+        let leftover_slice: &[u8] = leftover.as_ref();
+        if !leftover_slice.iter().all(|b| b.is_ascii_whitespace()) {
+            for line in leftover_slice.split(|b| *b == b'\n') {
+                let body = strip_trailing_cr(line);
+                self.process_line(body, &mut out);
             }
         }
-        out
+        out.freeze()
     }
 
-    fn process_line(&mut self, line: &str, out: &mut String) {
-        let trimmed = line.trim_end_matches('\r');
-        if let Some(rest) = trimmed.strip_prefix("event: ") {
-            let kind = rest.trim().to_string();
+    fn process_line(&mut self, line: &[u8], out: &mut BytesMut) {
+        if let Some(rest) = line.strip_prefix(b"event: ") {
+            let kind = String::from_utf8_lossy(rest).trim().to_string();
             self.pending_event_type = kind.clone();
             if is_allowed(&kind) {
-                out.push_str("event: ");
-                out.push_str(&kind);
-                out.push('\n');
+                out.put_slice(b"event: ");
+                out.put_slice(kind.as_bytes());
+                out.put_u8(b'\n');
             }
             return;
         }
-        if let Some(rest) = trimmed.strip_prefix("data: ") {
-            let data = rest.trim();
+        if let Some(rest) = line.strip_prefix(b"data: ") {
+            let data = String::from_utf8_lossy(rest);
             let event_type = std::mem::take(&mut self.pending_event_type);
-            self.process_data_line(data, &event_type, out);
+            self.process_data_line(data.trim(), &event_type, out);
             return;
         }
-        if trimmed.is_empty() {
+        if line.is_empty() {
             // SSE 帧分隔。透传可保留客户端流的节奏感。
-            out.push('\n');
+            out.put_u8(b'\n');
             return;
         }
-        // 注释行 (`:xxx`) 等。direct 模式透传，非 direct 丢弃。
+        // 注释行 (``:xxx``) 等。direct 模式透传，非 direct 丢弃。
         if self.direct.passthrough_sse_comments() {
-            out.push_str(trimmed);
-            out.push('\n');
+            out.put_slice(line);
+            out.put_u8(b'\n');
         }
     }
 
-    fn process_data_line(&mut self, data: &str, event_type_hint: &str, out: &mut String) {
+    fn process_data_line(&mut self, data: &str, event_type_hint: &str, out: &mut BytesMut) {
         if data == "[DONE]" {
             // OpenAI 风格的 [DONE] sentinel，原样透传防止客户端期待
-            out.push_str("data: [DONE]\n\n");
+            out.put_slice(b"data: [DONE]\n\n");
             return;
         }
 
         if is_passthrough(event_type_hint) {
-            out.push_str("data: ");
-            out.push_str(data);
-            out.push_str("\n\n");
+            out.put_slice(b"data: ");
+            out.put_slice(data.as_bytes());
+            out.put_slice(b"\n\n");
             return;
         }
 
@@ -210,9 +217,12 @@ impl SseProcessor {
             sanitize_sse_event(&mut event, is_fast);
         }
 
-        out.push_str("data: ");
-        out.push_str(&serde_json::to_string(&event).unwrap_or_default());
-        out.push_str("\n\n");
+        out.put_slice(b"data: ");
+        match serde_json::to_vec(&event) {
+            Ok(v) => out.put_slice(&v),
+            Err(_) => return,
+        }
+        out.put_slice(b"\n\n");
     }
 }
 
@@ -239,10 +249,14 @@ mod tests {
         SseProcessor::new(DirectFlags::SHARED_POOL)
     }
 
+    fn s(b: Bytes) -> String {
+        String::from_utf8(b.to_vec()).expect("utf8")
+    }
+
     #[test]
     fn passthrough_event_types_skip_parse() {
         let mut p = pool();
-        let out = p.feed("event: ping\ndata: {}\n\n");
+        let out = s(p.feed(b"event: ping\ndata: {}\n\n"));
         assert!(out.contains("event: ping"));
         assert!(out.contains("data: {}"));
     }
@@ -250,9 +264,9 @@ mod tests {
     #[test]
     fn cross_chunk_message_delta_extracts_usage() {
         let mut p = pool();
-        let chunk1 = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"model\":\"claude-opus-4.6\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":50}}}\n\n";
-        let chunk2_part1 = "event: message_delta\ndata: {\"type\":\"message_delta\",";
-        let chunk2_part2 = "\"usage\":{\"output_tokens\":42}}\n\n";
+        let chunk1 = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"model\":\"claude-opus-4.6\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":50}}}\n\n";
+        let chunk2_part1 = b"event: message_delta\ndata: {\"type\":\"message_delta\",";
+        let chunk2_part2 = b"\"usage\":{\"output_tokens\":42}}\n\n";
         p.feed(chunk1);
         p.feed(chunk2_part1);
         p.feed(chunk2_part2);
@@ -267,8 +281,8 @@ mod tests {
     fn buffer_residual_flushes_on_finish() {
         let mut p = pool();
         // 注意：最后一行没有终止 \n
-        p.feed("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"x\",\"model\":\"claude-opus-4.6\",\"usage\":{\"input_tokens\":5}}}\n\n");
-        p.feed("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}");
+        p.feed(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"x\",\"model\":\"claude-opus-4.6\",\"usage\":{\"input_tokens\":5}}}\n\n");
+        p.feed(b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}");
         let _ = p.finish();
         assert!(p.stats().usage_recorded);
         assert_eq!(p.stats().final_usage.as_ref().unwrap().output_tokens, 7);
@@ -277,32 +291,32 @@ mod tests {
     #[test]
     fn non_whitelisted_event_dropped_in_pool_mode() {
         let mut p = pool();
-        let out = p.feed("event: copilot_usage\ndata: {\"type\":\"copilot_usage\"}\n\n");
+        let out = s(p.feed(b"event: copilot_usage\ndata: {\"type\":\"copilot_usage\"}\n\n"));
         assert!(!out.contains("copilot_usage"));
     }
 
     #[test]
     fn direct_mode_passes_unknown_events() {
         let mut p = SseProcessor::new(DirectFlags::PASS_THROUGH);
-        let out = p.feed("event: copilot_usage\ndata: {\"type\":\"copilot_usage\",\"foo\":1}\n\n");
+        let out = s(p.feed(b"event: copilot_usage\ndata: {\"type\":\"copilot_usage\",\"foo\":1}\n\n"));
         assert!(out.contains("copilot_usage"));
     }
 
     #[test]
     fn comment_lines_dropped_in_pool_passthrough_in_direct() {
         let mut p = pool();
-        let out_pool = p.feed(":heartbeat\n\n");
+        let out_pool = s(p.feed(b":heartbeat\n\n"));
         assert!(!out_pool.contains("heartbeat"));
 
         let mut d = SseProcessor::new(DirectFlags::PASS_THROUGH);
-        let out_direct = d.feed(":heartbeat\n\n");
+        let out_direct = s(d.feed(b":heartbeat\n\n"));
         assert!(out_direct.contains("heartbeat"));
     }
 
     #[test]
     fn done_sentinel_forwarded() {
         let mut p = pool();
-        let out = p.feed("data: [DONE]\n\n");
+        let out = s(p.feed(b"data: [DONE]\n\n"));
         assert!(out.contains("[DONE]"));
     }
 
@@ -335,8 +349,8 @@ mod tests {
     #[test]
     fn sanitize_runs_in_pool_mode() {
         let mut p = pool();
-        let chunk = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_anthropic_x\",\"model\":\"claude-opus-4.6\",\"provider\":\"anthropic\"}}\n\n";
-        let out = p.feed(chunk);
+        let chunk = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_anthropic_x\",\"model\":\"claude-opus-4.6\",\"provider\":\"anthropic\"}}\n\n";
+        let out = s(p.feed(chunk));
         // provider 应被剥掉，id 应被改写
         assert!(!out.contains("\"provider\""));
         assert!(out.contains("msg_bdrk_"));
@@ -345,9 +359,25 @@ mod tests {
     #[test]
     fn sanitize_skipped_in_direct_mode() {
         let mut p = SseProcessor::new(DirectFlags::PASS_THROUGH);
-        let chunk = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_xyz\",\"model\":\"claude-opus-4.6\",\"provider\":\"foo\"}}\n\n";
-        let out = p.feed(chunk);
+        let chunk = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_xyz\",\"model\":\"claude-opus-4.6\",\"provider\":\"foo\"}}\n\n";
+        let out = s(p.feed(chunk));
         assert!(out.contains("\"provider\""));
         assert!(out.contains("msg_xyz"));
+    }
+
+    #[test]
+    fn multibyte_utf8_across_chunk_boundary() {
+        // 中文 "中" (E4 B8 AD) 跨 chunk 切。data 行内 \n 不会落在多字节 char 中间，
+        // 但 chunk 边界可以落在 char 中间，必须等 chunk 拼起来再过行扫描。
+        let mut p = pool();
+        let part1 = &[
+            b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\xE4\xB8".to_vec(),
+        ][0];
+        let part2 = &[
+            b"\xAD\"}}\n\n".to_vec(),
+        ][0];
+        p.feed(part1);
+        let out = s(p.feed(part2));
+        assert!(out.contains("中"), "got {out}");
     }
 }

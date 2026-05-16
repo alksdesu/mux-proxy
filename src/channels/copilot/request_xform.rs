@@ -382,104 +382,104 @@ pub struct XformContext {
 }
 
 /// 主入口：执行 plan 列出的全部 13 步。direct 模式只走 step 1。
-/// 返回上游应使用的请求体；upstream_model 通过 out-param 暴露给 handler 路由用。
-pub fn transform_request_body(
-    payload: &mut Value,
-    ctx: XformContext,
-) -> AppResult<Option<String>> {
-    // 非 Object → 直接序列化
+/// payload 原地改写；handler 之后从 payload["model"] 取上游模型名。
+pub fn transform_request_body(payload: &mut Value, ctx: XformContext) -> AppResult<()> {
     if !payload.is_object() {
-        return Ok(None);
+        return Ok(());
     }
-
-    // step 1
     strip_unsupported_params(payload);
-
-    // step 2：direct 短路
     if ctx.is_direct {
-        return Ok(None);
+        return Ok(());
     }
-
-    // step 3：speed=fast
-    let speed_is_fast = {
-        let map = payload.as_object().expect("checked above");
-        map.get("speed")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "fast")
-            .unwrap_or(false)
-    };
-    if speed_is_fast {
-        as_object_mut(payload).expect("object").remove("speed");
+    let speed_is_fast = consume_speed_fast(payload);
+    apply_model_and_thinking(payload, speed_is_fast);
+    if model_is_opus_47(payload) {
+        normalize_opus_47(payload);
     }
-
-    // step 4 + 5：thinking override + 模型重写
-    let mut upstream_model_out: Option<String> = None;
-    if let Some(Value::String(model)) = as_object_mut(payload).expect("object").get_mut("model") {
-        let decision = extract_thinking_override(model);
-        let mut upstream_model = decision.upstream_model.clone();
-        if speed_is_fast && !upstream_model.ends_with("-fast") {
-            upstream_model.push_str("-fast");
-        }
-        *model = upstream_model.clone();
-        upstream_model_out = Some(upstream_model);
-        apply_thinking_override(payload, &decision.mode);
-    }
-
-    // step 6：Opus 4.7 强制 adaptive + medium effort
-    if let Some(model) = payload
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-    {
-        if is_opus_47(&model) {
-            normalize_opus_47(payload);
-        }
-    }
-
-    // step 7：非 4.7 路径 effort max → high
     downgrade_effort_max(payload);
-
-    // step 8：Opus 4.7 采样硬拒。top_p/top_k 在 step 1 已被 strip，本次实际只检 temperature；
-    // top_p/top_k 的拒绝由 handler.rs 在 transform 之前的预校验完成（在原始 payload 上）。
     opus47_rejects_sampling(payload)?;
-
-    // step 9：cleanCacheControl 三处
-    if let Some(map) = as_object_mut(payload) {
-        if let Some(system) = map.get_mut("system") {
-            clean_cache_control(system);
-        }
-        if let Some(Value::Array(messages)) = map.get_mut("messages") {
-            for msg in messages.iter_mut() {
-                if let Some(m) = as_object_mut(msg) {
-                    if let Some(content) = m.get_mut("content") {
-                        clean_cache_control(content);
-                    }
-                }
-            }
-        }
-        if let Some(tools) = map.get_mut("tools") {
-            clean_cache_control(tools);
-        }
-    }
-
-    // step 10：tools defer_loading
-    if let Some(tools) = as_object_mut(payload).and_then(|m| m.get_mut("tools")) {
-        fix_tools(tools);
-    }
-
-    // step 11：content block 修复
-    if let Some(messages) = as_object_mut(payload).and_then(|m| m.get_mut("messages")) {
-        fix_content_blocks(messages);
-    }
-
-    // step 12 (Web Search tool 替换) 由 web_search.rs 的 detect_and_replace 完成（在 transform 之前调用）；
-    // step 13：individual base 映射
+    apply_clean_cache_control(payload);
+    apply_tools_fix(payload);
+    apply_content_blocks_fix(payload);
+    // step 12（Web Search tool 替换）由 web_search::detect_and_replace 在本函数之前完成。
     if ctx.is_individual_base {
         remap_individual_model(payload);
     }
+    Ok(())
+}
 
-    let _ = upstream_model_out; // 上层从 payload["model"] 重新读即可，这里只为标注顺序
-    Ok(None)
+/// step 3：标记并剥掉顶层 ``speed=fast``。
+fn consume_speed_fast(payload: &mut Value) -> bool {
+    let Some(map) = as_object_mut(payload) else {
+        return false;
+    };
+    let fast = map.get("speed").and_then(|v| v.as_str()) == Some("fast");
+    if fast {
+        map.remove("speed");
+    }
+    fast
+}
+
+/// step 4 + 5：剥 thinking 后缀写回 model，再按 mode 落 ``thinking`` / ``output_config``。
+fn apply_model_and_thinking(payload: &mut Value, speed_is_fast: bool) {
+    let Some(map) = as_object_mut(payload) else {
+        return;
+    };
+    let Some(Value::String(model)) = map.get_mut("model") else {
+        return;
+    };
+    let decision = extract_thinking_override(model);
+    let mut upstream_model = decision.upstream_model;
+    if speed_is_fast && !upstream_model.ends_with("-fast") {
+        upstream_model.push_str("-fast");
+    }
+    *model = upstream_model;
+    apply_thinking_override(payload, &decision.mode);
+}
+
+/// step 6 守卫：lowercase model 是否落到 Opus 4.7 系列。
+fn model_is_opus_47(payload: &Value) -> bool {
+    payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(is_opus_47)
+        .unwrap_or(false)
+}
+
+/// step 9：``system`` / ``messages[*].content`` / ``tools`` 三处递归清 cache_control。
+fn apply_clean_cache_control(payload: &mut Value) {
+    let Some(map) = as_object_mut(payload) else {
+        return;
+    };
+    if let Some(system) = map.get_mut("system") {
+        clean_cache_control(system);
+    }
+    if let Some(Value::Array(messages)) = map.get_mut("messages") {
+        for msg in messages.iter_mut() {
+            if let Some(m) = as_object_mut(msg) {
+                if let Some(content) = m.get_mut("content") {
+                    clean_cache_control(content);
+                }
+            }
+        }
+    }
+    if let Some(tools) = map.get_mut("tools") {
+        clean_cache_control(tools);
+    }
+}
+
+/// step 10：在 tools 数组上跑 fix_tools。
+fn apply_tools_fix(payload: &mut Value) {
+    if let Some(tools) = as_object_mut(payload).and_then(|m| m.get_mut("tools")) {
+        fix_tools(tools);
+    }
+}
+
+/// step 11：在 messages 数组上跑 fix_content_blocks。
+fn apply_content_blocks_fix(payload: &mut Value) {
+    if let Some(messages) = as_object_mut(payload).and_then(|m| m.get_mut("messages")) {
+        fix_content_blocks(messages);
+    }
 }
 
 fn normalize_opus_47(payload: &mut Value) {

@@ -418,14 +418,12 @@ impl CopilotHandler {
         let stream = async_stream::stream! {
             // guard 必须 move 进 stream，stream end 时 drop 才释放并发位
             let _guard = guard;
-            let mut decoder = utf8_lossy::Decoder::new();
             loop {
                 match upstream_stream.next().await {
                     Some(Ok(chunk)) => {
-                        let chunk_str = decoder.feed(&chunk);
-                        let out = processor.feed(&chunk_str);
+                        let out = processor.feed(&chunk);
                         if !out.is_empty() {
-                            yield Ok::<_, std::io::Error>(Bytes::from(out));
+                            yield Ok::<_, std::io::Error>(out);
                         }
                     }
                     Some(Err(e)) => {
@@ -437,7 +435,7 @@ impl CopilotHandler {
             }
             let tail = processor.finish();
             if !tail.is_empty() {
-                yield Ok(Bytes::from(tail));
+                yield Ok(tail);
             }
 
             // 计费：优先用 final_usage，否则 fallback partial
@@ -749,51 +747,6 @@ fn reqwest_method(m: &http::Method) -> reqwest::Method {
     }
 }
 
-/// 简易 UTF-8 流式解码器：缓存最后 0..3 个字节让多字节字符跨 chunk 不破坏。
-mod utf8_lossy {
-    pub struct Decoder {
-        pending: Vec<u8>,
-    }
-
-    impl Decoder {
-        pub fn new() -> Self {
-            Self { pending: Vec::new() }
-        }
-
-        pub fn feed(&mut self, chunk: &[u8]) -> String {
-            let mut buf = std::mem::take(&mut self.pending);
-            buf.extend_from_slice(chunk);
-            let (valid, rest) = match std::str::from_utf8(&buf) {
-                Ok(s) => (s.to_string(), Vec::new()),
-                Err(e) => {
-                    let split = e.valid_up_to();
-                    let valid = unsafe { std::str::from_utf8_unchecked(&buf[..split]) }.to_string();
-                    let mut tail = Vec::new();
-                    if e.error_len().is_none() && split + 4 > buf.len() {
-                        tail.extend_from_slice(&buf[split..]);
-                    } else {
-                        // 无法恢复：用 replacement 字符兜底
-                        let bad_end = match e.error_len() {
-                            Some(n) => split + n,
-                            None => buf.len(),
-                        };
-                        let mut s = valid;
-                        s.push('\u{FFFD}');
-                        return s + &Self::decode_strict(&buf[bad_end..]);
-                    }
-                    (valid, tail)
-                }
-            };
-            self.pending = rest;
-            valid
-        }
-
-        fn decode_strict(rest: &[u8]) -> String {
-            String::from_utf8_lossy(rest).into_owned()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,13 +789,4 @@ mod tests {
         assert_eq!(out, body);
     }
 
-    #[test]
-    fn utf8_lossy_handles_split_codepoint() {
-        let mut d = utf8_lossy::Decoder::new();
-        // 中文字符 "中" = E4 B8 AD，拆 2+1
-        let part1 = d.feed(&[0xE4, 0xB8]);
-        assert_eq!(part1, "");
-        let part2 = d.feed(&[0xAD]);
-        assert_eq!(part2, "中");
-    }
 }

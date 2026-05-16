@@ -3,11 +3,12 @@
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use memchr::memmem;
 use once_cell::sync::Lazy;
 use regex::bytes::Regex;
 use std::borrow::Cow;
 use std::sync::Arc;
+
+pub use crate::shared::line_codec::find_event_boundary;
 
 static RESTORE_CACHE: Lazy<DashMap<String, Arc<Regex>>> = Lazy::new(DashMap::new);
 
@@ -61,25 +62,6 @@ pub fn rewrite_sse_blob(
     original_model: &str,
 ) -> Bytes {
     rewrite_json_response(blob, current_model, original_model)
-}
-
-static FINDER_LF: Lazy<memmem::Finder<'static>> =
-    Lazy::new(|| memmem::Finder::new(b"\n\n"));
-static FINDER_CRLF: Lazy<memmem::Finder<'static>> =
-    Lazy::new(|| memmem::Finder::new(b"\r\n\r\n"));
-
-/// 找首个 SSE 事件边界。返回 ``(idx, delim_len)``；找不到返回 None。
-/// 双 finder 走 SIMD，比 regex 快得多。
-pub fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    let a = FINDER_LF.find(buf);
-    let b = FINDER_CRLF.find(buf);
-    match (a, b) {
-        (Some(i), Some(j)) if i <= j => Some((i, 2)),
-        (Some(_), Some(j)) => Some((j, 4)),
-        (Some(i), None) => Some((i, 2)),
-        (None, Some(j)) => Some((j, 4)),
-        (None, None) => None,
-    }
 }
 
 #[cfg(test)]

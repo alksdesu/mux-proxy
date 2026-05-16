@@ -1,28 +1,18 @@
-//! 上游 key 429 累计熔断（重置式固定窗口）。窗口内累计达阈值 disable，过 recover 自动恢复。
-//! threshold/window/recover 与旧 TS 版一致便于灰度观测；TS 版也是重置式不是真滑动窗口。
+//! Copilot 上游 key 429 累计熔断。重置式固定窗口（Reset-Window），
+//! 真正逻辑在 ``shared::breaker`` 的泛型 ``Breaker<S>``；本模块只是渠道侧的
+//! newtype + 默认参数 + ``record_429`` 别名（历史调用方习惯名字）。
 
 use crate::channels::{BreakerSnapshot, ChannelKind};
-use dashmap::DashMap;
-use std::time::{Duration, Instant};
+use crate::shared::breaker::{
+    Breaker as SharedBreaker, BreakerConfig, ResetWindowStrategy,
+};
+use std::time::Duration;
 
 pub const BREAKER_THRESHOLD: u32 = 10;
 pub const BREAKER_WINDOW: Duration = Duration::from_secs(600);
 pub const BREAKER_RECOVER: Duration = Duration::from_secs(1800);
 
-#[derive(Clone, Debug)]
-struct Entry {
-    count: u32,
-    first_at: Instant,
-    last_at: Instant,
-    disabled_at: Option<Instant>,
-}
-
-pub struct Breaker {
-    inner: DashMap<i64, Entry>,
-    threshold: u32,
-    window: Duration,
-    recover: Duration,
-}
+pub struct Breaker(SharedBreaker<ResetWindowStrategy>);
 
 impl Breaker {
     pub fn new() -> Self {
@@ -30,99 +20,37 @@ impl Breaker {
     }
 
     pub fn with(threshold: u32, window: Duration, recover: Duration) -> Self {
-        Self {
-            inner: DashMap::new(),
+        Self(SharedBreaker::new(BreakerConfig {
             threshold,
             window,
             recover,
-        }
+            channel_kind: ChannelKind::Copilot,
+        }))
     }
 
-    /// 记录一次 429。窗口外的旧记录直接重置。返回是否触发了 disable。
+    /// 历史命名兼容：``record_429`` 等价于通用 ``record_failure``。
     pub fn record_429(&self, upstream_id: i64) -> bool {
-        let now = Instant::now();
-        let mut entry = self.inner.entry(upstream_id).or_insert(Entry {
-            count: 0,
-            first_at: now,
-            last_at: now,
-            disabled_at: None,
-        });
-        if now.duration_since(entry.first_at) > self.window {
-            entry.count = 0;
-            entry.first_at = now;
-            entry.disabled_at = None;
-        }
-        entry.count += 1;
-        entry.last_at = now;
-        if entry.count >= self.threshold && entry.disabled_at.is_none() {
-            entry.disabled_at = Some(now);
-            true
-        } else {
-            false
-        }
+        self.0.record_failure(upstream_id)
     }
 
-    /// 检查 upstream 是否被熔断。disabled_at 超过 recover 自动恢复并清零。
     pub fn is_disabled(&self, upstream_id: i64) -> bool {
-        let now = Instant::now();
-        let mut entry = match self.inner.get_mut(&upstream_id) {
-            Some(e) => e,
-            None => return false,
-        };
-        match entry.disabled_at {
-            None => false,
-            Some(at) if now.duration_since(at) > self.recover => {
-                entry.count = 0;
-                entry.first_at = now;
-                entry.disabled_at = None;
-                false
-            }
-            Some(_) => true,
-        }
+        self.0.is_disabled(upstream_id)
     }
 
-    /// admin 手动重置：清掉计数与 disabled 状态。
     pub fn reset(&self, upstream_id: i64) {
-        self.inner.remove(&upstream_id);
+        self.0.reset(upstream_id);
     }
 
-    /// admin 手动熔断：强制把某个 upstream 标记为 disabled。
     pub fn force_disable(&self, upstream_id: i64) {
-        let now = Instant::now();
-        self.inner
-            .entry(upstream_id)
-            .and_modify(|e| {
-                e.disabled_at = Some(now);
-                e.last_at = now;
-            })
-            .or_insert(Entry {
-                count: 0,
-                first_at: now,
-                last_at: now,
-                disabled_at: Some(now),
-            });
+        self.0.force_disable(upstream_id);
     }
 
     pub fn snapshot(&self) -> Vec<BreakerSnapshot> {
-        let now = Instant::now();
-        self.inner
-            .iter()
-            .map(|kv| {
-                let e = kv.value();
-                BreakerSnapshot {
-                    id: *kv.key(),
-                    channel_kind: ChannelKind::Copilot,
-                    count: e.count,
-                    disabled: e.disabled_at.is_some(),
-                    first_at_ms_ago: now.duration_since(e.first_at).as_millis(),
-                    last_at_ms_ago: now.duration_since(e.last_at).as_millis(),
-                }
-            })
-            .collect()
+        self.0.snapshot()
     }
 
     pub fn tracked(&self) -> usize {
-        self.inner.len()
+        self.0.tracked()
     }
 }
 
