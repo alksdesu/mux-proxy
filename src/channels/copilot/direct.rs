@@ -1,6 +1,6 @@
 //! 直传分支的判断与开关：客户端 api_keys.upstream_key 直接给 prefix:token 时，
-//! 跳过 transform 13 步（保留 step 1 strip）、跳过 sanitize_sse_event / sanitize_response_body、
-//! 跳过 error_logs.model 字段；SSE 行级注释 `:xxx` 也透传不丢。
+//! 跳过 request_xform / sanitize_sse_event / sanitize_response_body / error_logs.model；
+//! SSE 行级注释 ``:xxx`` 也透传不丢。
 
 /// 直传模式下的开关集合。handler 据此短路 transform / sanitize / SSE 注释丢弃。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,7 +13,7 @@ impl DirectFlags {
     pub const PASS_THROUGH: Self = Self { direct: true };
     pub const SHARED_POOL: Self = Self { direct: false };
 
-    /// 跳过 transform 13 步（除 step 1 strip）。
+    /// 跳过 request_xform 改写（``strip_unsupported_params`` 仍会跑）。
     pub fn skip_request_transform(self) -> bool {
         self.direct
     }

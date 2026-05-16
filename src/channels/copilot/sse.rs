@@ -80,37 +80,40 @@ impl SseProcessor {
         out.freeze()
     }
 
-    /// 结束流：buffer 残留也走一次 flush（保最后 chunk 落 usage）。
+    /// 结束流：把 buffer 里剩余的（有 ``\n`` 和无 ``\n`` 的尾巴）全 flush。
     pub fn finish(&mut self) -> Bytes {
-        let mut out = BytesMut::new();
-        if self.buffer.is_empty() {
-            return out.freeze();
+        let mut out = BytesMut::with_capacity(self.buffer.len());
+        while let Some((idx, dlen)) = find_line_boundary(&self.buffer) {
+            let line = self.buffer.split_to(idx + dlen);
+            let body = strip_trailing_cr(&line[..line.len() - dlen]);
+            self.process_line(body, &mut out);
         }
-        let leftover = std::mem::take(&mut self.buffer);
-        let leftover_slice: &[u8] = leftover.as_ref();
-        if !leftover_slice.iter().all(|b| b.is_ascii_whitespace()) {
-            for line in leftover_slice.split(|b| *b == b'\n') {
-                let body = strip_trailing_cr(line);
-                self.process_line(body, &mut out);
-            }
+        if !self.buffer.is_empty() {
+            let tail = std::mem::take(&mut self.buffer);
+            let body = strip_trailing_cr(&tail);
+            self.process_line(body, &mut out);
         }
         out.freeze()
     }
 
     fn process_line(&mut self, line: &[u8], out: &mut BytesMut) {
         if let Some(rest) = line.strip_prefix(b"event: ") {
-            let kind = String::from_utf8_lossy(rest).trim().to_string();
-            self.pending_event_type = kind.clone();
-            if is_allowed(&kind) {
+            self.pending_event_type.clear();
+            self.pending_event_type
+                .push_str(String::from_utf8_lossy(rest).trim());
+            if is_allowed(&self.pending_event_type) {
                 out.put_slice(b"event: ");
-                out.put_slice(kind.as_bytes());
+                out.put_slice(self.pending_event_type.as_bytes());
                 out.put_u8(b'\n');
             }
             return;
         }
         if let Some(rest) = line.strip_prefix(b"data: ") {
             let data = String::from_utf8_lossy(rest);
-            let event_type = std::mem::take(&mut self.pending_event_type);
+            // clone + clear 让 pending_event_type 跨事件复用 capacity，
+            // 而不是 mem::take 把 buffer 整个换成新分配的空 String。
+            let event_type = self.pending_event_type.clone();
+            self.pending_event_type.clear();
             self.process_data_line(data.trim(), &event_type, out);
             return;
         }

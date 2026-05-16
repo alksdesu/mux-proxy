@@ -4,7 +4,8 @@
 
 use crate::billing::UsageWriter;
 use crate::channels::anthropic::billing_hook::SseUsageAggregator;
-use crate::channels::anthropic::model_restore::{find_event_boundary, rewrite_sse_blob};
+use crate::channels::anthropic::model_restore::rewrite_sse_blob;
+use crate::shared::line_codec::{find_event_boundary, strip_trailing_cr};
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc;
 use tracing::error;
@@ -83,15 +84,6 @@ pub(crate) fn scan_event(event: &[u8], agg: &mut SseUsageAggregator) {
         b"message_delta" => agg.ingest_message_delta(&joined),
         _ => {}
     }
-}
-
-fn strip_trailing_cr(line: &[u8]) -> &[u8] {
-    if let Some((last, rest)) = line.split_last() {
-        if *last == b'\r' {
-            return rest;
-        }
-    }
-    line
 }
 
 fn trim_ascii(s: &[u8]) -> &[u8] {

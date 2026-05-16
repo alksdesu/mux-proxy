@@ -8,8 +8,6 @@ use regex::bytes::Regex;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-pub use crate::shared::line_codec::find_event_boundary;
-
 static RESTORE_CACHE: Lazy<DashMap<String, Arc<Regex>>> = Lazy::new(DashMap::new);
 
 fn restore_regex(current_model: &str) -> Arc<Regex> {
@@ -124,33 +122,4 @@ mod tests {
         assert!(Arc::ptr_eq(&r1, &r2));
     }
 
-    #[test]
-    fn find_event_boundary_lf() {
-        let buf = b"event: x\ndata: y\n\nrest";
-        let (idx, dlen) = find_event_boundary(buf).unwrap();
-        assert_eq!(&buf[idx..idx + dlen], b"\n\n");
-    }
-
-    #[test]
-    fn find_event_boundary_crlf() {
-        let buf = b"event: x\r\ndata: y\r\n\r\nrest";
-        let (idx, dlen) = find_event_boundary(buf).unwrap();
-        assert_eq!(&buf[idx..idx + dlen], b"\r\n\r\n");
-    }
-
-    #[test]
-    fn find_event_boundary_picks_earlier_of_mixed() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"line\n\n");
-        buf.extend_from_slice(b"x\r\n\r\n");
-        let (idx, dlen) = find_event_boundary(&buf).unwrap();
-        assert_eq!(idx, 4);
-        assert_eq!(dlen, 2);
-    }
-
-    #[test]
-    fn find_event_boundary_none() {
-        assert!(find_event_boundary(b"no terminator here").is_none());
-        assert!(find_event_boundary(b"").is_none());
-    }
 }

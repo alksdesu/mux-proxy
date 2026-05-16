@@ -1,6 +1,6 @@
 //! 官方 Anthropic key 池：纯随机选 + 401/403 直接熔断、429 滑动窗口累计。
-//! 阈值 5 次 / 300s 窗口 / 900s 自动恢复，比 Copilot 渠道宽松。
-//! 熔断逻辑走 ``shared::breaker`` 泛型实现，本模块只负责 keys 缓存 + DB 同步。
+//! 熔断逻辑走 ``shared::breaker`` 泛型实现；本模块负责 keys 缓存 + DB 同步 +
+//! ``BreakerInfo`` 到带 ``ChannelKind`` 的 ``BreakerSnapshot`` 的 wrap。
 
 use crate::channels::anthropic::upstream_key;
 use crate::channels::{BreakerSnapshot, ChannelKind};
@@ -57,7 +57,6 @@ fn new_breaker() -> SharedBreaker<SlidingWindowStrategy> {
         threshold: BREAKER_THRESHOLD,
         window: BREAKER_WINDOW,
         recover: BREAKER_RECOVER,
-        channel_kind: ChannelKind::Anthropic,
     })
 }
 
@@ -152,7 +151,18 @@ impl KeyPool {
     }
 
     pub fn snapshot_breakers(&self) -> Vec<BreakerSnapshot> {
-        self.breaker.snapshot()
+        self.breaker
+            .snapshot()
+            .into_iter()
+            .map(|info| BreakerSnapshot {
+                id: info.id,
+                channel_kind: ChannelKind::Anthropic,
+                count: info.count,
+                disabled: info.disabled,
+                first_at_ms_ago: info.first_at_ms_ago,
+                last_at_ms_ago: info.last_at_ms_ago,
+            })
+            .collect()
     }
 
     /// admin 手动恢复：清掉指定 key 的失败计数与 open_until。

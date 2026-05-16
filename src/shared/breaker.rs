@@ -1,19 +1,29 @@
 //! 上游 key 熔断器：泛型 ``Breaker<S>`` + 两个窗口策略。
 //! 两渠道靠 ``BreakerStrategy::CLEAR_ON_TRIP`` 区分 trip 后是否清失败状态：
-//! - Copilot 的重置式窗口 trip 后保留 count 给 snapshot 显示，recover 后才清；
-//! - Anthropic 的滑动窗口 trip 时立即清失败列表，snapshot 期间用 threshold 当 count。
+//! - 重置式窗口：trip 后保留 count，recover 后才清；
+//! - 滑动窗口：trip 时立即清失败列表，snapshot 期间 count 已为 0，由调用方决定渲染。
+//!
+//! 本模块不引用任何渠道层类型；``snapshot()`` 返回中性的 ``BreakerInfo``，
+//! 渠道层自己 wrap 成带 ``channel_kind`` 的对外快照。
 
-use crate::channels::{BreakerSnapshot, ChannelKind};
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
 
-/// 单条 ``Breaker`` 的运行参数。``channel_kind`` 决定 snapshot 出去时的渠道标记。
 #[derive(Clone, Copy, Debug)]
 pub struct BreakerConfig {
     pub threshold: u32,
     pub window: Duration,
     pub recover: Duration,
-    pub channel_kind: ChannelKind,
+}
+
+/// ``Breaker::snapshot()`` 的中性输出：纯失败状态视图，不含渠道信息。
+#[derive(Clone, Debug)]
+pub struct BreakerInfo {
+    pub id: i64,
+    pub count: u32,
+    pub disabled: bool,
+    pub first_at_ms_ago: u128,
+    pub last_at_ms_ago: u128,
 }
 
 /// 失败计数语义。``CLEAR_ON_TRIP`` 控制 trip 那一刻是否清失败状态。
@@ -149,22 +159,31 @@ impl<S: BreakerStrategy> Breaker<S> {
         false
     }
 
-    /// 判定是否被熔断。到期自动 recover：清 ``open_until`` 与失败状态。
+    /// 判定是否被熔断。Happy path 走 ``get`` read lock；只有 recover 到期需要清状态时
+    /// 才升级到 ``get_mut`` write lock，避免热路径上 pick 一次 10 把 key 全部写锁。
     pub fn is_disabled(&self, id: i64) -> bool {
         let now = Instant::now();
-        let mut cell = match self.inner.get_mut(&id) {
-            Some(c) => c,
-            None => return false,
+        let deadline = {
+            let cell = match self.inner.get(&id) {
+                Some(c) => c,
+                None => return false,
+            };
+            match cell.open_until {
+                None => return false,
+                Some(d) => d,
+            }
         };
-        match cell.open_until {
-            None => false,
-            Some(deadline) if now >= deadline => {
+        if now < deadline {
+            return true;
+        }
+        // 到期才升级 write lock 做 recover；CAS 失败 / 已被并发清就放它过
+        if let Some(mut cell) = self.inner.get_mut(&id) {
+            if matches!(cell.open_until, Some(d) if now >= d) {
                 cell.open_until = None;
                 cell.strategy.clear();
-                false
             }
-            Some(_) => true,
         }
+        false
     }
 
     /// admin 手动恢复：直接抹掉条目。
@@ -182,8 +201,9 @@ impl<S: BreakerStrategy> Breaker<S> {
         }
     }
 
-    /// 给 admin / WS 用的快照。``count==0 && !disabled`` 的条目跳过。
-    pub fn snapshot(&self) -> Vec<BreakerSnapshot> {
+    /// admin / WS 用的中性快照。``count==0 && !disabled`` 的条目跳过；
+    /// 渠道层负责把 ``BreakerInfo`` wrap 成带 channel 标记的对外类型。
+    pub fn snapshot(&self) -> Vec<BreakerInfo> {
         let now = Instant::now();
         self.inner
             .iter()
@@ -191,9 +211,10 @@ impl<S: BreakerStrategy> Breaker<S> {
             .collect()
     }
 
-    fn snapshot_one(&self, id: i64, cell: &Cell<S>, now: Instant) -> Option<BreakerSnapshot> {
+    fn snapshot_one(&self, id: i64, cell: &Cell<S>, now: Instant) -> Option<BreakerInfo> {
         let disabled = matches!(cell.open_until, Some(d) if now < d);
-        if !disabled && cell.strategy.count() == 0 {
+        let raw_count = cell.strategy.count();
+        if !disabled && raw_count == 0 {
             return None;
         }
         let trip_at = cell
@@ -202,17 +223,18 @@ impl<S: BreakerStrategy> Breaker<S> {
         let count = if disabled && S::CLEAR_ON_TRIP {
             self.config.threshold
         } else {
-            cell.strategy.count()
+            raw_count
         };
         let first = cell.strategy.first_at().or(trip_at).unwrap_or(now);
         let last = cell.strategy.last_at().or(trip_at).unwrap_or(now);
-        Some(BreakerSnapshot {
+        let first_ms = now.checked_duration_since(first).unwrap_or_default().as_millis();
+        let last_ms = now.checked_duration_since(last).unwrap_or_default().as_millis();
+        Some(BreakerInfo {
             id,
-            channel_kind: self.config.channel_kind,
             count,
             disabled,
-            first_at_ms_ago: now.checked_duration_since(first).unwrap_or_default().as_millis(),
-            last_at_ms_ago: now.checked_duration_since(last).unwrap_or_default().as_millis(),
+            first_at_ms_ago: first_ms,
+            last_at_ms_ago: last_ms,
         })
     }
 
@@ -225,21 +247,18 @@ impl<S: BreakerStrategy> Breaker<S> {
 mod tests {
     use super::*;
 
-    fn cfg_reset(threshold: u32, window: Duration, recover: Duration) -> BreakerConfig {
+    fn cfg(threshold: u32, window: Duration, recover: Duration) -> BreakerConfig {
         BreakerConfig {
             threshold,
             window,
             recover,
-            channel_kind: ChannelKind::Copilot,
         }
     }
+    fn cfg_reset(threshold: u32, window: Duration, recover: Duration) -> BreakerConfig {
+        cfg(threshold, window, recover)
+    }
     fn cfg_sliding(threshold: u32, window: Duration, recover: Duration) -> BreakerConfig {
-        BreakerConfig {
-            threshold,
-            window,
-            recover,
-            channel_kind: ChannelKind::Anthropic,
-        }
+        cfg(threshold, window, recover)
     }
 
     #[test]

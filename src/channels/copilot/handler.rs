@@ -158,23 +158,19 @@ impl CopilotHandler {
             }
         }
 
-        // 请求体改写
+        // 请求体改写。direct 模式由 ``transform_request_body`` 自行短路到只跑 strip。
         let upstream_body: Bytes = match (&ctx.method, request_body_value.as_mut()) {
             (m, Some(v)) if *m != http::Method::GET && *m != http::Method::HEAD => {
-                if direct_flags.direct {
-                    strip_unsupported_params(v);
-                } else {
-                    transform_request_body(
-                        v,
-                        XformContext {
-                            is_direct: false,
-                            is_individual_base: current_parsed
-                                .as_ref()
-                                .map(|p| p.prefix == CopilotPrefix::Individual)
-                                .unwrap_or(false),
-                        },
-                    )?;
-                }
+                transform_request_body(
+                    v,
+                    XformContext {
+                        is_direct: direct_flags.direct,
+                        is_individual_base: current_parsed
+                            .as_ref()
+                            .map(|p| p.prefix == CopilotPrefix::Individual)
+                            .unwrap_or(false),
+                    },
+                )?;
                 Bytes::from(serde_json::to_vec(v)?)
             }
             (m, None) if *m == http::Method::GET || *m == http::Method::HEAD => Bytes::new(),
@@ -292,7 +288,7 @@ impl CopilotHandler {
             if status == StatusCode::TOO_MANY_REQUESTS {
                 crate::metrics::GLOBAL.record_upstream_429(crate::channels::ChannelKind::Copilot);
                 if let Some(id) = current_upstream_id {
-                    self.breaker.record_429(id);
+                    self.breaker.record_failure(id);
                 }
             }
             if needs_swap {

@@ -1,7 +1,6 @@
-//! 请求体改写：严格 13 步顺序与旧 proxy.ts 对齐。
-//! - direct 模式只走 step 1（stripUnsupportedParams），其它都跳过；
-//! - 顶层 model 字段在 step 5 写回 upstream_model（剥掉 thinking 后缀，可能加 `-fast`）；
-//! - step 13 individual base 把连字符模型名映射成点号。
+//! Copilot 请求体改写：顺序固定，direct 模式只跑 ``strip_unsupported_params``。
+//! 顶层 ``model`` 在 ``apply_model_and_thinking`` 写回剥掉 thinking 后缀的上游模型名；
+//! individual base 渠道把连字符模型名映射成点号。
 
 use crate::channels::copilot::model_map;
 use crate::error::{AppError, AppResult};
@@ -10,7 +9,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{Value, json};
 
-/// thinking effort 强弱档（plan §request_xform.rs 列表）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThinkingEffort {
     Max,
@@ -63,7 +61,7 @@ static TOOLU_PREFIX_RE: Lazy<Regex> =
 static TOOL_USE_ID_SANITIZE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_]").expect("TOOL_USE_ID_SANITIZE_RE compile"));
 
-/// step 1 + direct 模式唯一一步：删除上游不支持的顶层字段。
+/// 删除上游不支持的顶层字段。direct 模式只跑这一步。
 pub fn strip_unsupported_params(obj: &mut Value) -> bool {
     let Some(map) = as_object_mut(obj) else {
         return false;
@@ -77,7 +75,7 @@ pub fn strip_unsupported_params(obj: &mut Value) -> bool {
     changed
 }
 
-/// step 4：剥 model 末段 thinking 后缀（含 `-fast` 时倒数第二段才是 override）。
+/// 剥 model 末段 thinking 后缀（含 ``-fast`` 时倒数第二段才是 override）。
 pub fn extract_thinking_override(model: &str) -> ThinkingDecision {
     let segments: Vec<&str> = model.split('-').collect();
     if segments.len() < 2 {
@@ -135,7 +133,7 @@ fn parse_thinking_token(token: &str) -> Option<ThinkingOverride> {
     ThinkingEffort::parse(token).map(ThinkingOverride::Effort)
 }
 
-/// step 5：根据 mode 写入 thinking 字段与 output_config.effort。
+/// 根据 mode 写入 thinking 字段与 output_config.effort。
 pub fn apply_thinking_override(json: &mut Value, mode: &ThinkingOverride) {
     if matches!(mode, ThinkingOverride::None) {
         return;
@@ -188,7 +186,7 @@ fn take_object_or_new(
     }
 }
 
-/// step 9：递归清洗 cache_control，每个对象只保留 `type`，删其它键。
+/// 递归清洗 cache_control，每个对象只保留 ``type``，删其它键。
 pub fn clean_cache_control(value: &mut Value) {
     let Some(arr) = as_array_mut(value) else {
         return;
@@ -208,8 +206,7 @@ pub fn clean_cache_control(value: &mut Value) {
     }
 }
 
-/// step 8：Opus 4.7 路径不能带 temperature!=1 / top_p / top_k，直接返 400。
-/// direct 模式不调用本函数。
+/// Opus 4.7 路径不能带 temperature!=1 / top_p / top_k，直接返 400。direct 模式不调用。
 pub fn opus47_rejects_sampling(json: &Value) -> AppResult<()> {
     let Some(map) = json.as_object() else {
         return Ok(());
@@ -262,7 +259,7 @@ pub fn is_opus_47(model: &str) -> bool {
     m.contains("opus-4-7") || m.contains("opus-4.7")
 }
 
-/// step 11：content block 修复（server_tool_use id / draft_task / tool_reference / 空 text）。
+/// content block 修复：server_tool_use id / draft_task / tool_reference / 空 text。
 pub fn fix_content_blocks(messages: &mut Value) {
     let Some(arr) = as_array_mut(messages) else {
         return;
@@ -341,7 +338,7 @@ fn is_empty_text_block(b: &Value) -> bool {
             .unwrap_or(true)
 }
 
-/// step 10：tools 修复（删 defer_loading）。返回是否触发修改，便于上层判断。
+/// tools 修复：递归删 ``defer_loading``。
 pub fn fix_tools(tools: &mut Value) {
     let Some(arr) = as_array_mut(tools) else {
         return;
@@ -359,7 +356,7 @@ pub fn fix_tools(tools: &mut Value) {
     }
 }
 
-/// step 13：individual base 模型名映射（连字符 → 点号）。返回是否替换过。
+/// individual base 模型名映射（连字符 → 点号）。返回是否替换过。
 pub fn remap_individual_model(json: &mut Value) -> bool {
     let Some(map) = as_object_mut(json) else {
         return false;
@@ -381,8 +378,8 @@ pub struct XformContext {
     pub is_individual_base: bool,
 }
 
-/// 主入口：执行 plan 列出的全部 13 步。direct 模式只走 step 1。
-/// payload 原地改写；handler 之后从 payload["model"] 取上游模型名。
+/// 主入口：固定顺序原地改写 payload。direct 模式只跑 ``strip_unsupported_params``。
+/// Web Search tool 替换由 ``web_search::detect_and_replace`` 在本函数之前完成。
 pub fn transform_request_body(payload: &mut Value, ctx: XformContext) -> AppResult<()> {
     if !payload.is_object() {
         return Ok(());
@@ -401,14 +398,13 @@ pub fn transform_request_body(payload: &mut Value, ctx: XformContext) -> AppResu
     apply_clean_cache_control(payload);
     apply_tools_fix(payload);
     apply_content_blocks_fix(payload);
-    // step 12（Web Search tool 替换）由 web_search::detect_and_replace 在本函数之前完成。
     if ctx.is_individual_base {
         remap_individual_model(payload);
     }
     Ok(())
 }
 
-/// step 3：标记并剥掉顶层 ``speed=fast``。
+/// 标记并剥掉顶层 ``speed=fast``。
 fn consume_speed_fast(payload: &mut Value) -> bool {
     let Some(map) = as_object_mut(payload) else {
         return false;
@@ -420,7 +416,7 @@ fn consume_speed_fast(payload: &mut Value) -> bool {
     fast
 }
 
-/// step 4 + 5：剥 thinking 后缀写回 model，再按 mode 落 ``thinking`` / ``output_config``。
+/// 剥 thinking 后缀写回 model，再按 mode 落 ``thinking`` / ``output_config``。
 fn apply_model_and_thinking(payload: &mut Value, speed_is_fast: bool) {
     let Some(map) = as_object_mut(payload) else {
         return;
@@ -437,7 +433,7 @@ fn apply_model_and_thinking(payload: &mut Value, speed_is_fast: bool) {
     apply_thinking_override(payload, &decision.mode);
 }
 
-/// step 6 守卫：lowercase model 是否落到 Opus 4.7 系列。
+/// lowercase model 是否落到 Opus 4.7 系列。
 fn model_is_opus_47(payload: &Value) -> bool {
     payload
         .get("model")
@@ -446,7 +442,7 @@ fn model_is_opus_47(payload: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// step 9：``system`` / ``messages[*].content`` / ``tools`` 三处递归清 cache_control。
+/// ``system`` / ``messages[*].content`` / ``tools`` 三处递归清 cache_control。
 fn apply_clean_cache_control(payload: &mut Value) {
     let Some(map) = as_object_mut(payload) else {
         return;
@@ -468,14 +464,14 @@ fn apply_clean_cache_control(payload: &mut Value) {
     }
 }
 
-/// step 10：在 tools 数组上跑 fix_tools。
+/// 在 tools 数组上跑 fix_tools。
 fn apply_tools_fix(payload: &mut Value) {
     if let Some(tools) = as_object_mut(payload).and_then(|m| m.get_mut("tools")) {
         fix_tools(tools);
     }
 }
 
-/// step 11：在 messages 数组上跑 fix_content_blocks。
+/// 在 messages 数组上跑 fix_content_blocks。
 fn apply_content_blocks_fix(payload: &mut Value) {
     if let Some(messages) = as_object_mut(payload).and_then(|m| m.get_mut("messages")) {
         fix_content_blocks(messages);
@@ -779,7 +775,7 @@ mod tests {
     #[test]
     fn transform_e2e_opus_47_rejects_top_p() {
         let mut v = json!({"model": "claude-opus-4-7", "top_p": 0.5});
-        // top_p 在 step 1 已经被剥掉，所以 step 8 看不到 top_p — 不会触发拒绝
+        // top_p 在 strip_unsupported_params 已被剥掉，opus47 拒绝检查看不到，故必须 pass
         let res = transform_request_body(
             &mut v,
             XformContext {
@@ -787,7 +783,7 @@ mod tests {
                 is_individual_base: false,
             },
         );
-        assert!(res.is_ok(), "top_p removed by strip step 1 should pass");
+        assert!(res.is_ok(), "top_p stripped before opus47 check, must pass");
     }
 
     #[test]

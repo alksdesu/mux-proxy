@@ -1,6 +1,5 @@
-//! Copilot 上游 key 429 累计熔断。重置式固定窗口（Reset-Window），
-//! 真正逻辑在 ``shared::breaker`` 的泛型 ``Breaker<S>``；本模块只是渠道侧的
-//! newtype + 默认参数 + ``record_429`` 别名（历史调用方习惯名字）。
+//! Copilot 上游 key 429 累计熔断。重置式固定窗口，逻辑由 ``shared::breaker``
+//! 的泛型 ``Breaker<S>`` 提供；本模块负责渠道默认参数与 ``BreakerInfo`` → ``BreakerSnapshot`` 的 wrap。
 
 use crate::channels::{BreakerSnapshot, ChannelKind};
 use crate::shared::breaker::{
@@ -24,12 +23,10 @@ impl Breaker {
             threshold,
             window,
             recover,
-            channel_kind: ChannelKind::Copilot,
         }))
     }
 
-    /// 历史命名兼容：``record_429`` 等价于通用 ``record_failure``。
-    pub fn record_429(&self, upstream_id: i64) -> bool {
+    pub fn record_failure(&self, upstream_id: i64) -> bool {
         self.0.record_failure(upstream_id)
     }
 
@@ -46,7 +43,18 @@ impl Breaker {
     }
 
     pub fn snapshot(&self) -> Vec<BreakerSnapshot> {
-        self.0.snapshot()
+        self.0
+            .snapshot()
+            .into_iter()
+            .map(|info| BreakerSnapshot {
+                id: info.id,
+                channel_kind: ChannelKind::Copilot,
+                count: info.count,
+                disabled: info.disabled,
+                first_at_ms_ago: info.first_at_ms_ago,
+                last_at_ms_ago: info.last_at_ms_ago,
+            })
+            .collect()
     }
 
     pub fn tracked(&self) -> usize {
@@ -68,7 +76,7 @@ mod tests {
     fn record_below_threshold_not_disabled() {
         let b = Breaker::new();
         for _ in 0..(BREAKER_THRESHOLD - 1) {
-            assert!(!b.record_429(1));
+            assert!(!b.record_failure(1));
         }
         assert!(!b.is_disabled(1));
     }
@@ -77,9 +85,9 @@ mod tests {
     fn record_at_threshold_disables() {
         let b = Breaker::new();
         for i in 0..BREAKER_THRESHOLD {
-            let tripped = b.record_429(1);
+            let tripped = b.record_failure(1);
             if i + 1 == BREAKER_THRESHOLD {
-                assert!(tripped, "should disable on threshold");
+                assert!(tripped);
             } else {
                 assert!(!tripped);
             }
@@ -90,18 +98,18 @@ mod tests {
     #[test]
     fn window_expiry_resets_count() {
         let b = Breaker::with(3, Duration::from_millis(10), BREAKER_RECOVER);
-        b.record_429(1);
-        b.record_429(1);
+        b.record_failure(1);
+        b.record_failure(1);
         std::thread::sleep(Duration::from_millis(15));
-        assert!(!b.record_429(1), "window expired, fresh count starts at 1");
+        assert!(!b.record_failure(1));
         assert!(!b.is_disabled(1));
     }
 
     #[test]
     fn recover_resets_disabled() {
         let b = Breaker::with(2, BREAKER_WINDOW, Duration::from_millis(10));
-        b.record_429(1);
-        b.record_429(1);
+        b.record_failure(1);
+        b.record_failure(1);
         assert!(b.is_disabled(1));
         std::thread::sleep(Duration::from_millis(15));
         assert!(!b.is_disabled(1));
@@ -111,7 +119,7 @@ mod tests {
     fn reset_clears_state() {
         let b = Breaker::new();
         for _ in 0..BREAKER_THRESHOLD {
-            b.record_429(1);
+            b.record_failure(1);
         }
         assert!(b.is_disabled(1));
         b.reset(1);
@@ -127,12 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_lists_entries() {
+    fn snapshot_lists_entries_with_copilot_kind() {
         let b = Breaker::new();
-        b.record_429(1);
+        b.record_failure(1);
         b.force_disable(2);
         let snap = b.snapshot();
         assert_eq!(snap.len(), 2);
+        for s in &snap {
+            assert_eq!(s.channel_kind, ChannelKind::Copilot);
+        }
         let s1 = snap.iter().find(|x| x.id == 1).unwrap();
         assert_eq!(s1.count, 1);
         assert!(!s1.disabled);
@@ -144,7 +155,7 @@ mod tests {
     fn multiple_keys_independent() {
         let b = Breaker::new();
         for _ in 0..BREAKER_THRESHOLD {
-            b.record_429(1);
+            b.record_failure(1);
         }
         assert!(b.is_disabled(1));
         assert!(!b.is_disabled(2));
