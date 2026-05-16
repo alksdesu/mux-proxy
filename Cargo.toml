@@ -87,7 +87,9 @@ tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [profile.release]
-lto = "fat"
+# thin LTO 在 IO 密集 proxy 上与 fat LTO 运行时差距 < 2%，但 build 时间从 5min → 2min。
+# codegen-units=1 保留：让 LLVM 仍能跨 codegen unit 做 ICF / 内联，单进程链接接受。
+lto = "thin"
 codegen-units = 1
 strip = "symbols"
 opt-level = 3
