@@ -40,7 +40,9 @@ pub struct HandlerContext {
     pub client: AnthropicUpstreamClient,
     pub key_pool: Arc<KeyPool>,
     pub usage_writer: UsageWriter,
-    pub rewrite_rules: Vec<RewriteRule>,
+    /// load_full 的 Arc，dispatch 把 ArcSwap 当前快照传过来；
+    /// 在请求生命周期内固定，admin 改完下次请求才看到新版本。
+    pub rewrite_rules: Arc<Vec<RewriteRule>>,
     pub key_cache_entry: KeyCacheEntry,
     pub client_ip: Option<String>,
     pub concurrency_guard: ConcurrencyGuard,

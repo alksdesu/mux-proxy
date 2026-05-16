@@ -181,14 +181,15 @@ function switchTab(tab) {
   loadTab(tab);
 }
 
-function loadTab(tab) {
+function loadTab(tab, opts) {
+  const isAuto = !!(opts && opts.auto);
   switch(tab) {
     case 'overview': loadOverview(); break;
     case 'keys': loadKeys(); break;
     case 'usage': loadUsage(); break;
     case 'errors': loadErrors(); break;
     case 'map': loadMap(); break;
-    case 'system': loadSystem(); break;
+    case 'system': loadSystem({ auto: isAuto }); break;
   }
 }
 
@@ -997,7 +998,10 @@ async function plotIPs(ips) {
 }
 
 // ===== SYSTEM =====
-function loadSystem() {
+// auto=true 仅刷新 telemetry（连接状态 / upstream 池熔断），跳过配置类（rewrite rules）
+// 避免用户停在 system tab 期间每 5-10s 重复拉一份不变的规则表。
+function loadSystem(opts) {
+  const isAuto = !!(opts && opts.auto);
   document.getElementById('system-session-info').textContent = `Key: ${KEY.slice(0, 8)}...${KEY.slice(-4)}`;
   testAuth().then(ok => {
     document.getElementById('system-conn-info').innerHTML = ok
@@ -1005,10 +1009,16 @@ function loadSystem() {
       : `<span style="color:var(--red)">已断开</span>`;
   });
   loadUpstreamKeys();
-  loadAnthropicRules();
+  if (!isAuto) {
+    loadAnthropicRules();
+  }
 }
 
 // ===== ANTHROPIC REWRITE RULES =====
+// id -> rule 缓存：行内 onclick 用 id 查表，避免把含引号 / HTML 的 prefix 内嵌进
+// onclick="JSON.stringify(...)" 造成属性破坏 + XSS。
+const rewriteRulesById = new Map();
+
 async function loadAnthropicRules() {
   try {
     const rows = await api('GET', '/admin/anthropic/rewrite-rules');
@@ -1018,12 +1028,13 @@ async function loadAnthropicRules() {
 
 function renderAnthropicRules(rows) {
   const tbody = document.getElementById('anthropic-rules-tbody');
+  rewriteRulesById.clear();
   if (!rows || rows.length === 0) {
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">暂无映射规则。客户端发什么 model 上游就收到什么。</td></tr>';
     return;
   }
-  // 按 target 分组排序，让多对一关系视觉上更清晰
   rows.sort((a, b) => (a.target === b.target ? a.id - b.id : a.target.localeCompare(b.target)));
+  rows.forEach(r => rewriteRulesById.set(r.id, r));
   tbody.innerHTML = rows.map(r => `
     <tr>
       <td class="mono">${r.id}</td>
@@ -1032,8 +1043,8 @@ function renderAnthropicRules(rows) {
       <td>${r.enabled ? '<span class="badge badge-green">启用</span>' : '<span class="badge">禁用</span>'}</td>
       <td style="font-size:11px;color:var(--text-secondary)">${fmtTime(r.created_at)}</td>
       <td>
-        <button class="btn btn-sm" onclick='editRewriteRule(${JSON.stringify(r)})'>编辑</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteRewriteRule(${r.id}, ${JSON.stringify(r.prefix)})">删除</button>
+        <button class="btn btn-sm" onclick="editRewriteRuleById(${r.id})">编辑</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteRewriteRuleById(${r.id})">删除</button>
       </td>
     </tr>
   `).join('');
@@ -1048,7 +1059,9 @@ function showAddRewriteRuleModal() {
   openModal('modal-rewrite-rule');
 }
 
-function editRewriteRule(rule) {
+function editRewriteRuleById(id) {
+  const rule = rewriteRulesById.get(id);
+  if (!rule) { toast('规则不存在，请刷新', 'error'); return; }
   document.getElementById('rewrite-rule-title').textContent = `编辑映射 — ${rule.prefix}`;
   document.getElementById('rr-id').value = rule.id;
   document.getElementById('rr-prefix').value = rule.prefix;
@@ -1075,8 +1088,10 @@ async function saveRewriteRule() {
   } catch(e) { toast('保存失败: ' + e.message, 'error'); }
 }
 
-async function deleteRewriteRule(id, prefix) {
-  if (!confirm(`确定删除映射 ${prefix} ?`)) return;
+async function deleteRewriteRuleById(id) {
+  const rule = rewriteRulesById.get(id);
+  if (!rule) { toast('规则不存在，请刷新', 'error'); return; }
+  if (!confirm(`确定删除映射 ${rule.prefix} ?`)) return;
   try {
     await api('DELETE', `/admin/anthropic/rewrite-rules?id=${id}`);
     toast('已删除', 'success');
@@ -1293,7 +1308,7 @@ function startRefresh() {
   refreshTimer = setInterval(async () => {
     if (document.hidden || refreshRunning) return;
     refreshRunning = true;
-    try { await loadTab(activeTab); } catch {}
+    try { await loadTab(activeTab, { auto: true }); } catch {}
     refreshRunning = false;
   }, refreshMs);
 }

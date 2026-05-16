@@ -29,13 +29,19 @@ pub struct KeyCacheEntry {
 }
 
 impl KeyCacheEntry {
-    /// 命中白名单返 true；空白名单视为不限制。比对走 lowercase 精确匹配。
+    pub fn is_fresh(&self, ttl: Duration) -> bool {
+        self.fetched_at.elapsed() < ttl
+    }
+
+    /// 命中白名单返 true；空白名单视为不限制。``eq_ignore_ascii_case`` 避免
+    /// 每次请求都 alloc 一个 lowercase needle，热路径 ns 级开销。
     pub fn model_allowed(&self, model: &str) -> bool {
         if self.allowed_models.is_empty() {
             return true;
         }
-        let needle = model.to_ascii_lowercase();
-        self.allowed_models.iter().any(|m| m == &needle)
+        self.allowed_models
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(model))
     }
 }
 
@@ -46,12 +52,6 @@ pub fn parse_allowed_models(spec: &str) -> Vec<String> {
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-impl KeyCacheEntry {
-    pub fn is_fresh(&self, ttl: Duration) -> bool {
-        self.fetched_at.elapsed() < ttl
-    }
 }
 
 pub struct KeyCache {

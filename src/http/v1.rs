@@ -77,12 +77,10 @@ async fn dispatch(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if let Some(requested) =
-            crate::channels::anthropic::model_splice::extract_client_model(&bytes, content_type)
+            crate::shared::model_field::extract_model_field(&bytes, content_type)
         {
             if !entry.model_allowed(&requested) {
-                return Err(AppError::Forbidden(format!(
-                    "model '{requested}' is not allowed for this key"
-                )));
+                return Err(AppError::ModelNotAllowed { model: requested });
             }
         }
     }
@@ -165,13 +163,12 @@ async fn dispatch_anthropic(
     client_ip: String,
 ) -> Result<AxumResponse<Body>, AppError> {
     // load_full 拿到的 Arc 在本 dispatch 生命周期内固定，
-    // admin 改 rules 后下一个 dispatch 才看到新版本。
-    let rules_arc = state.anthropic_rules.load_full();
+    // admin 改 rules 后下一个 dispatch 才看到新版本。直接传 Arc 不深 clone。
     let ctx = AnthropicCtx {
         client: state.anthropic_client.clone(),
         key_pool: state.anthropic_pool.clone(),
         usage_writer: state.usage_writer.clone(),
-        rewrite_rules: (*rules_arc).clone(),
+        rewrite_rules: state.anthropic_rules.load_full(),
         key_cache_entry: entry,
         client_ip: if client_ip.is_empty() { None } else { Some(client_ip) },
         concurrency_guard: guard,

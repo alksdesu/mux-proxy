@@ -2,6 +2,7 @@
 //! 业务侧匹配第一条命中的 rule，所以表内顺序由 ``id ASC`` 保证；同 target 多 prefix 是
 //! 合法用法（多个客户端 model 映射到同一上游真实 model）。
 
+use crate::channels::anthropic::model_splice::RewriteRule;
 use crate::db::pool::Db;
 use crate::error::AppResult;
 use chrono::Utc;
@@ -153,36 +154,35 @@ pub async fn delete(db: &Db, id: i64) -> AppResult<bool> {
     Ok(res.rows_affected() > 0)
 }
 
-/// 首次启动种子：DB 表空 且 env var 给了 ``prefix=target,prefix=target`` → 批量写入。
-/// 已有数据则跳过，避免覆盖运维侧改动。
+/// 首次启动种子：DB 表空时把已 parse 好的 env 规则一次性 commit 进去；
+/// 已有 DB 数据则跳过，避免覆盖运维侧改动。事务包住所有 INSERT，
+/// 中途失败不会留下半截种子（下次启动 count==0 还能重试）。
 pub async fn seed_from_env_if_empty(
     db: &Db,
-    env_spec: &str,
+    rules: &[RewriteRule],
 ) -> AppResult<usize> {
+    if rules.is_empty() {
+        return Ok(0);
+    }
     let existing = count(db).await?;
     if existing > 0 {
         return Ok(0);
     }
-    let trimmed = env_spec.trim();
-    if trimmed.is_empty() {
-        return Ok(0);
-    }
+    let mut tx = db.pool().begin().await?;
+    let created_at = Utc::now().to_rfc3339();
     let mut inserted = 0usize;
-    for entry in trimmed.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let Some((prefix, target)) = entry.split_once('=') else {
-            continue;
-        };
-        let prefix = prefix.trim();
-        let target = target.trim();
-        if prefix.is_empty() || target.is_empty() {
-            continue;
-        }
-        create(db, prefix, target, true).await?;
+    for r in rules {
+        sqlx::query(
+            "INSERT INTO anthropic_rewrite_rules (prefix, target, enabled, created_at) \
+             VALUES ($1, $2, 1, $3)",
+        )
+        .bind(&r.prefix)
+        .bind(&r.target)
+        .bind(&created_at)
+        .execute(&mut *tx)
+        .await?;
         inserted += 1;
     }
+    tx.commit().await?;
     Ok(inserted)
 }

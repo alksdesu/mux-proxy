@@ -28,7 +28,7 @@ impl IntoResponse for AppError {
 fn error_type(err: &AppError) -> &'static str {
     match err {
         AppError::Unauthorized => "authentication_error",
-        AppError::Forbidden(_) => "permission_error",
+        AppError::Forbidden(_) | AppError::ModelNotAllowed { .. } => "permission_error",
         AppError::NotFound => "not_found_error",
         AppError::BadRequest(_) => "invalid_request_error",
         AppError::RateLimited(_) | AppError::QuotaExceeded | AppError::ConcurrencyExceeded => "rate_limit_error",

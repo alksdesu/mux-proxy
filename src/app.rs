@@ -223,13 +223,11 @@ async fn load_anthropic_rules(
     db: &crate::db::Db,
     cfg: &Config,
 ) -> AppResult<Arc<ArcSwap<Vec<RewriteRule>>>> {
-    let env_spec = cfg
-        .anthropic_rewrite_rules
-        .iter()
-        .map(|r| format!("{}={}", r.prefix, r.target))
-        .collect::<Vec<_>>()
-        .join(",");
-    let inserted = crate::db::anthropic_rules::seed_from_env_if_empty(db, &env_spec).await?;
+    let inserted = crate::db::anthropic_rules::seed_from_env_if_empty(
+        db,
+        &cfg.anthropic_rewrite_rules,
+    )
+    .await?;
     if inserted > 0 {
         info!(inserted, "seeded anthropic rewrite rules from env");
     }

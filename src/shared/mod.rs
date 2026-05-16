@@ -6,4 +6,5 @@ pub mod ids;
 pub mod json;
 pub mod leak_re;
 pub mod line_codec;
+pub mod model_field;
 pub mod sse_event;

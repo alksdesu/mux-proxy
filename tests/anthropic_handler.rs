@@ -78,7 +78,7 @@ fn build_ctx(
         client,
         key_pool,
         usage_writer,
-        rewrite_rules,
+        rewrite_rules: Arc::new(rewrite_rules),
         key_cache_entry: dummy_entry(),
         client_ip: Some("127.0.0.1".into()),
         concurrency_guard: guard,

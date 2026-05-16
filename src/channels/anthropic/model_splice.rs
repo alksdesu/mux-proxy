@@ -1,9 +1,8 @@
 //! 字节级请求体 ``"model"`` 字段替换。多轮 thinking 块含 HMAC 签名，
 //! 任何 JSON parse/dump 都会改字节顺序或 escape，把签名搞废。
 
+use crate::shared::model_field::{extract_model_field, model_field_regex};
 use bytes::Bytes;
-use once_cell::sync::Lazy;
-use regex::bytes::Regex;
 
 /// 单条改写规则：prefix 串前缀匹配则替换为 target。``str::starts_with`` 大小写敏感。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,21 +77,9 @@ impl RewriteOutcome {
     }
 }
 
-static MODEL_FIELD: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"("model"\s*:\s*")([^"]+)(")"#).expect("MODEL_FIELD compiles"));
-
-/// 单纯从请求体里抽出 ``"model"`` 字段的值，不做改写。给计费兜底用：
-/// 即使 rewritten=false（没命中任何 rule），handler 也能拿到客户端 model 名喂给 SniffContext。
+/// 历史命名 wrapper：rewrite_body 路径仍延用 ``extract_client_model``。
 pub fn extract_client_model(body: &[u8], content_type: &str) -> Option<String> {
-    if body.is_empty() {
-        return None;
-    }
-    if !content_type.to_ascii_lowercase().contains("application/json") {
-        return None;
-    }
-    let caps = MODEL_FIELD.captures(body)?;
-    let value_match = caps.get(2)?;
-    std::str::from_utf8(value_match.as_bytes()).ok().map(String::from)
+    extract_model_field(body, content_type)
 }
 
 /// 检查请求体里第一处 ``"model": "X"`` 是否命中改写规则，若命中替换 X 为 target。
@@ -105,7 +92,7 @@ pub fn rewrite_body(body: Bytes, content_type: &str, rules: &[RewriteRule]) -> R
         return RewriteOutcome::untouched(body);
     }
 
-    let caps = match MODEL_FIELD.captures(&body) {
+    let caps = match model_field_regex().captures(&body) {
         Some(c) => c,
         None => return RewriteOutcome::untouched(body),
     };

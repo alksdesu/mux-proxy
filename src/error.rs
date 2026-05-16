@@ -20,6 +20,9 @@ pub enum AppError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("model '{model}' is not allowed for this key")]
+    ModelNotAllowed { model: String },
+
     #[error("not found")]
     NotFound,
 
@@ -64,7 +67,7 @@ impl AppError {
     pub fn status_code(&self) -> u16 {
         match self {
             AppError::Unauthorized => 401,
-            AppError::Forbidden(_) => 403,
+            AppError::Forbidden(_) | AppError::ModelNotAllowed { .. } => 403,
             AppError::NotFound => 404,
             AppError::BadRequest(_) => 400,
             AppError::RateLimited(_) | AppError::QuotaExceeded | AppError::ConcurrencyExceeded => 429,

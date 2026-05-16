@@ -2,6 +2,7 @@
 //! ``app::reload_anthropic_rules`` 把 DB 新状态原子换进 ``AppState.anthropic_rules``，
 //! 同时 ``snapshot.bump`` 让 WS 客户端知道有变化。
 
+use crate::admin::query::parse_id_required;
 use crate::app::{AppState, reload_anthropic_rules};
 use crate::db::anthropic_rules::{self, RewriteRulePatch};
 use crate::error::{AppError, AppResult};
@@ -52,7 +53,7 @@ pub async fn patch_handler(
     Query(params): Query<HashMap<String, String>>,
     Json(patch): Json<RewriteRulePatch>,
 ) -> AppResult<axum::response::Response> {
-    let id = parse_id(&params)?;
+    let id = parse_id_required(params.get("id").map(String::as_str))?;
     if let Some(prefix) = patch.prefix.as_deref() {
         if prefix.trim().is_empty() {
             return Err(AppError::BadRequest("prefix cannot be empty".into()));
@@ -77,18 +78,11 @@ pub async fn delete_handler(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> AppResult<axum::response::Response> {
-    let id = parse_id(&params)?;
+    let id = parse_id_required(params.get("id").map(String::as_str))?;
     let deleted = anthropic_rules::delete(&state.db, id).await?;
     if !deleted {
         return Err(AppError::NotFound);
     }
     reload_anthropic_rules(&state).await?;
     Ok(Json(json!({"ok": true})).into_response())
-}
-
-fn parse_id(params: &HashMap<String, String>) -> AppResult<i64> {
-    params
-        .get("id")
-        .and_then(|s| s.parse::<i64>().ok())
-        .ok_or_else(|| AppError::BadRequest("missing or invalid 'id' query param".into()))
 }
