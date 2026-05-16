@@ -104,6 +104,9 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
     };
 
     let status = upstream.status();
+    if status.as_u16() == 429 {
+        crate::metrics::GLOBAL.record_upstream_429(ChannelKind::Anthropic);
+    }
     let fb = classify_status(status.as_u16());
     ctx.key_pool.apply_feedback(pooled.id, fb);
 

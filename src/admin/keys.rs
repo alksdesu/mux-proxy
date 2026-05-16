@@ -25,6 +25,8 @@ pub struct KeyListItemMasked {
     pub allow_fast: bool,
     pub max_concurrency: Value,
     pub current_concurrency: u32,
+    pub rpm_limit: i64,
+    pub rpm_current: u32,
     pub used: String,
     pub created_at: String,
     pub channel_kind: ChannelKind,
@@ -41,6 +43,8 @@ pub struct KeyListItemFull {
     pub allow_fast: bool,
     pub max_concurrency: i64,
     pub current_concurrency: u32,
+    pub rpm_limit: i64,
+    pub rpm_current: u32,
     pub used: f64,
     pub used_display: String,
     pub created_at: String,
@@ -57,12 +61,15 @@ pub struct CreateBody {
     pub allow_fast: bool,
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: i64,
+    #[serde(default = "default_rpm_limit")]
+    pub rpm_limit: i64,
     pub channel_kind: Option<ChannelKind>,
 }
 
 fn default_quota() -> f64 { -1.0 }
 fn default_allow_fast() -> bool { true }
 fn default_max_concurrency() -> i64 { -1 }
+fn default_rpm_limit() -> i64 { -1 }
 
 pub async fn list_handler(
     State(state): State<AppState>,
@@ -107,6 +114,8 @@ fn render_full(state: &AppState, k: ApiKey) -> KeyListItemFull {
         allow_fast: k.allow_fast,
         max_concurrency: k.max_concurrency,
         current_concurrency: state.limiter.current(&k.name),
+        rpm_limit: k.rpm_limit,
+        rpm_current: state.rate_limiter.current(&k.name) as u32,
         used,
         used_display: format!("${:.2}", used),
         created_at: k.created_at,
@@ -124,6 +133,8 @@ fn render_masked(state: &AppState, k: ApiKey) -> KeyListItemMasked {
         allow_fast: k.allow_fast,
         max_concurrency: max_concurrency_to_value(k.max_concurrency),
         current_concurrency: state.limiter.current(&k.name),
+        rpm_limit: k.rpm_limit,
+        rpm_current: state.rate_limiter.current(&k.name) as u32,
         used: format!("${:.2}", used),
         created_at: k.created_at,
         channel_kind: k.channel_kind,
@@ -175,6 +186,7 @@ pub async fn create_handler(
         body.quota,
         body.allow_fast,
         body.max_concurrency,
+        body.rpm_limit,
         channel,
     )
     .await?;

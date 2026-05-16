@@ -15,6 +15,7 @@ use crate::concurrency::ConcurrencyGuard;
 use crate::error::AppError;
 use crate::http::middleware::auth::client_auth_layer;
 use crate::http::middleware::quota::quota_layer;
+use crate::http::middleware::rate_limit::rate_limit_layer;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -27,9 +28,12 @@ use bytes::Bytes;
 pub const MAX_REQUEST_BODY: usize = 32 * 1024 * 1024;
 
 pub fn build_v1_router(state: AppState) -> Router<AppState> {
+    // layer 应用顺序与请求处理顺序相反：client_auth 最先跑（最外层 layer），
+    // 然后 quota，再 rate_limit，最后 dispatch。
     Router::new()
         .route("/v1", any(dispatch))
         .route("/v1/*path", any(dispatch))
+        .layer(from_fn_with_state(state.clone(), rate_limit_layer))
         .layer(from_fn_with_state(state.clone(), quota_layer))
         .layer(from_fn_with_state(state, client_auth_layer))
 }
@@ -43,11 +47,16 @@ async fn dispatch(
         .get::<KeyCacheEntry>()
         .cloned()
         .ok_or_else(|| AppError::Internal("dispatch requires client_auth".into()))?;
+    let channel = entry.channel_kind;
+    let started = std::time::Instant::now();
 
-    let guard = state
-        .limiter
-        .try_acquire(&entry.name, entry.max_concurrency)
-        .ok_or(AppError::ConcurrencyExceeded)?;
+    let guard = match state.limiter.try_acquire(&entry.name, entry.max_concurrency) {
+        Some(g) => g,
+        None => {
+            crate::metrics::GLOBAL.concurrency_rejections_total.inc();
+            return Err(AppError::ConcurrencyExceeded);
+        }
+    };
 
     let (parts, body) = req.into_parts();
     let bytes = axum::body::to_bytes(body, MAX_REQUEST_BODY)
@@ -60,7 +69,7 @@ async fn dispatch(
     let headers = parts.headers;
     let client_ip = extract_client_ip(&headers);
 
-    match entry.channel_kind {
+    let result = match channel {
         ChannelKind::Copilot => {
             dispatch_copilot(state, entry, guard, method, path, query, headers, bytes, client_ip)
                 .await
@@ -69,7 +78,15 @@ async fn dispatch(
             dispatch_anthropic(state, entry, guard, method, path, query, headers, bytes, client_ip)
                 .await
         }
-    }
+    };
+
+    let elapsed = started.elapsed().as_secs_f64();
+    let status = match &result {
+        Ok(resp) => resp.status().as_u16(),
+        Err(e) => e.status_code(),
+    };
+    crate::metrics::GLOBAL.record_request(channel, status, elapsed);
+    result
 }
 
 #[allow(clippy::too_many_arguments)]

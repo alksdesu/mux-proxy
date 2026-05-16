@@ -17,6 +17,7 @@ pub struct ApiKey {
     pub quota: f64,
     pub allow_fast: bool,
     pub max_concurrency: i64,
+    pub rpm_limit: i64,
     pub created_at: String,
     pub channel_kind: ChannelKind,
 }
@@ -32,6 +33,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ApiKey {
             quota: row.try_get("quota")?,
             allow_fast: allow_fast_int != 0,
             max_concurrency: row.try_get("max_concurrency")?,
+            rpm_limit: row.try_get("rpm_limit").unwrap_or(-1),
             created_at: row.try_get("created_at")?,
             channel_kind: row.try_get("channel_kind")?,
         })
@@ -45,6 +47,7 @@ pub struct ApiKeyPatch {
     pub quota: Option<f64>,
     pub allow_fast: Option<bool>,
     pub max_concurrency: Option<i64>,
+    pub rpm_limit: Option<i64>,
     pub channel_kind: Option<ChannelKind>,
 }
 

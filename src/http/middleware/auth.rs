@@ -53,6 +53,7 @@ pub async fn resolve_client_key(
                 quota: k.quota,
                 allow_fast: k.allow_fast,
                 max_concurrency: k.max_concurrency,
+                rpm_limit: k.rpm_limit,
                 channel_kind: k.channel_kind,
                 fetched_at: Instant::now(),
             }))

@@ -14,6 +14,8 @@ pub mod dashboard;
 pub mod db;
 pub mod error;
 pub mod http;
+pub mod metrics;
+pub mod rate_limit;
 pub mod shared;
 pub mod util;
 

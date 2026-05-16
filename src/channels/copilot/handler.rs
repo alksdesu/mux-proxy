@@ -22,7 +22,6 @@ use crate::channels::copilot::web_search;
 use crate::concurrency::ConcurrencyGuard;
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::shared::generic_errors::generic_message;
 use crate::shared::ids::gen_response_request_id;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -226,7 +225,7 @@ impl CopilotHandler {
                             }
                         }
                         warn!(error = ?e, "session token exchange failed");
-                        return Err(AppError::Upstream(generic_message(502).to_string()));
+                        return Err(AppError::UpstreamConnect("session token exchange failed".into()));
                     }
                 }
             } else {
@@ -278,7 +277,7 @@ impl CopilotHandler {
                             continue;
                         }
                     }
-                    return Err(AppError::Upstream(generic_message(502).to_string()));
+                    return Err(AppError::UpstreamConnect("upstream request failed".into()));
                 }
             };
 
@@ -291,6 +290,7 @@ impl CopilotHandler {
                 )
                 && attempt + 1 < max_retries;
             if status == StatusCode::TOO_MANY_REQUESTS {
+                crate::metrics::GLOBAL.record_upstream_429(crate::channels::ChannelKind::Copilot);
                 if let Some(id) = current_upstream_id {
                     self.breaker.record_429(id);
                 }
@@ -313,7 +313,7 @@ impl CopilotHandler {
         }
 
         let Some(upstream_resp) = upstream_resp else {
-            return Err(AppError::Upstream(generic_message(502).to_string()));
+            return Err(AppError::UpstreamConnect("all upstream retries failed".into()));
         };
 
         let status = upstream_resp.status();

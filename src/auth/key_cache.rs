@@ -21,6 +21,7 @@ pub struct KeyCacheEntry {
     pub quota: f64,
     pub allow_fast: bool,
     pub max_concurrency: i64,
+    pub rpm_limit: i64,
     pub channel_kind: ChannelKind,
     pub fetched_at: Instant,
 }
@@ -116,6 +117,7 @@ mod tests {
     fn entry(name: &str) -> KeyCacheEntry {
         KeyCacheEntry {
             id: 1,
+            rpm_limit: -1,
             name: name.into(),
             upstream_key: "enterprise:ghp_x".into(),
             quota: -1.0,

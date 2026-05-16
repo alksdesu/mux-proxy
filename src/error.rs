@@ -41,6 +41,15 @@ pub enum AppError {
     #[error("upstream timeout")]
     UpstreamTimeout,
 
+    #[error("upstream connect failed: {0}")]
+    UpstreamConnect(String),
+
+    #[error("upstream protocol error: {0}")]
+    UpstreamProtocol(String),
+
+    #[error("upstream status {status}: {message}")]
+    UpstreamStatus { status: u16, message: String },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -59,7 +68,14 @@ impl AppError {
             AppError::NotFound => 404,
             AppError::BadRequest(_) => 400,
             AppError::RateLimited(_) | AppError::QuotaExceeded | AppError::ConcurrencyExceeded => 429,
-            AppError::Upstream(_) | AppError::UpstreamTimeout => 502,
+            AppError::Upstream(_)
+            | AppError::UpstreamTimeout
+            | AppError::UpstreamConnect(_)
+            | AppError::UpstreamProtocol(_) => 502,
+            AppError::UpstreamStatus { status, .. } => {
+                if (400..600).contains(status) { *status } else { 502 }
+            }
+            AppError::Db(sqlx::Error::RowNotFound) => 404,
             AppError::Config(_)
             | AppError::Db(_)
             | AppError::Migrate(_)

@@ -2,7 +2,7 @@
 //! `/admin/usage/export` 单独允许 ?token=，匹配旧 dashboard `a[download]` 行为。
 //! `/ws` 由 axum::extract::WebSocketUpgrade 自己处理升级，鉴权挪进 socket loop。
 
-use crate::admin::{errors, export, geoip, keys, stats, timeseries, upstream, usage, ws};
+use crate::admin::{errors, export, geoip, keys, pricing, stats, timeseries, upstream, usage, ws};
 use crate::app::AppState;
 use crate::http::middleware::admin_auth::{admin_auth_layer, admin_auth_with_query_token};
 use axum::Router;
@@ -42,6 +42,7 @@ pub fn build_admin_router(state: AppState) -> Router<AppState> {
             get(upstream::breaker_get_handler).post(upstream::breaker_post_handler),
         )
         .route("/admin/geoip", get(geoip::handler))
+        .route("/admin/pricing", get(pricing::handler))
         .route("/admin/stats/timeseries", get(timeseries::handler))
         .route("/stats", get(stats::stats_handler))
         .route("/stats/reset", post(stats::reset_handler))
@@ -144,6 +145,7 @@ mod tests {
         let snapshot = Arc::new(SnapshotVersion::new());
         let spend = Arc::new(SpendCache::new());
         let limiter = Limiter::new(snapshot.clone());
+        let rate_limiter = crate::rate_limit::RateLimiter::new();
         let db = stub_db();
         let usage_writer = UsageWriter::new(db.clone(), spend.clone(), snapshot.clone());
         let upstream_notifier = UpstreamChangeNotifier::new();
@@ -171,6 +173,7 @@ mod tests {
             key_loader_sf: SingleFlight::new(),
             spend,
             limiter,
+            rate_limiter,
             snapshot,
             usage_writer,
             upstream_notifier,

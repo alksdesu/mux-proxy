@@ -21,7 +21,10 @@ pub async fn quota_layer(
         .extensions()
         .get::<KeyCacheEntry>()
         .ok_or_else(|| AppError::Internal("quota layer requires client_auth first".into()))?;
-    enforce_quota(entry, &state.spend)?;
+    if let Err(e) = enforce_quota(entry, &state.spend) {
+        crate::metrics::GLOBAL.quota_rejections_total.inc();
+        return Err(e);
+    }
     Ok(next.run(req).await)
 }
 
@@ -44,6 +47,7 @@ mod tests {
     fn entry(name: &str, quota: f64) -> KeyCacheEntry {
         KeyCacheEntry {
             id: 1,
+            rpm_limit: -1,
             name: name.into(),
             upstream_key: "*".into(),
             quota,

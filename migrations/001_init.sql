@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   quota DOUBLE PRECISION NOT NULL DEFAULT -1,
   allow_fast INTEGER NOT NULL DEFAULT 1,
   max_concurrency BIGINT NOT NULL DEFAULT -1,
+  rpm_limit BIGINT NOT NULL DEFAULT -1,
   created_at TEXT NOT NULL,
   channel_kind TEXT NOT NULL DEFAULT 'copilot'
 );

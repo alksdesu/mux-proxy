@@ -18,6 +18,7 @@ pub fn build(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(health))
+        .route("/metrics", get(metrics_export))
         .merge(admin_router)
         .merge(dashboard_router)
         .merge(v1_router)
@@ -28,4 +29,14 @@ pub fn build(state: AppState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn metrics_export() -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+    match crate::metrics::GLOBAL.encode_text() {
+        Ok(text) => ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("metrics encode failed: {e}"))
+            .into_response(),
+    }
 }

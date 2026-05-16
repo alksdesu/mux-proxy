@@ -11,6 +11,7 @@ use crate::concurrency::Limiter;
 use crate::config::Config;
 use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
+use crate::rate_limit::RateLimiter;
 use crate::util::inflight::{InflightGuard, InflightTracker};
 use axum::extract::ConnectInfo;
 use hyper::server::conn::http1;
@@ -134,6 +135,7 @@ pub struct AppState {
     pub key_loader_sf: SingleFlight<String, Option<KeyCacheEntry>>,
     pub spend: Arc<SpendCache>,
     pub limiter: Arc<Limiter>,
+    pub rate_limiter: Arc<RateLimiter>,
     pub snapshot: Arc<SnapshotVersion>,
     pub usage_writer: UsageWriter,
     /// admin 写 upstream_keys 时 bump，让 key_pool 下一轮 acquire 强制重读。
@@ -155,6 +157,8 @@ impl AppState {
         let spend = Arc::new(SpendCache::init_from_db(&db).await?);
         let limiter = Limiter::new(snapshot.clone());
         tokio::spawn(limiter.clone().run_gc());
+        let rate_limiter = RateLimiter::new();
+        tokio::spawn(rate_limiter.clone().run_gc());
 
         let usage_writer = UsageWriter::new(db.clone(), spend.clone(), snapshot.clone());
         let upstream_notifier = UpstreamChangeNotifier::new();
@@ -192,6 +196,7 @@ impl AppState {
             key_loader_sf: SingleFlight::new(),
             spend,
             limiter,
+            rate_limiter,
             snapshot,
             usage_writer,
             upstream_notifier,

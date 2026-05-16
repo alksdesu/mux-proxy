@@ -32,7 +32,11 @@ fn error_type(err: &AppError) -> &'static str {
         AppError::NotFound => "not_found_error",
         AppError::BadRequest(_) => "invalid_request_error",
         AppError::RateLimited(_) | AppError::QuotaExceeded | AppError::ConcurrencyExceeded => "rate_limit_error",
-        AppError::Upstream(_) | AppError::UpstreamTimeout => "api_error",
+        AppError::Upstream(_)
+        | AppError::UpstreamTimeout
+        | AppError::UpstreamConnect(_)
+        | AppError::UpstreamProtocol(_)
+        | AppError::UpstreamStatus { .. } => "api_error",
         _ => "api_error",
     }
 }

@@ -6,6 +6,7 @@ pub mod errors;
 pub mod export;
 pub mod geoip;
 pub mod keys;
+pub mod pricing;
 pub mod query;
 pub mod routes;
 pub mod stats;

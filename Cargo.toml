@@ -75,6 +75,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rust-embed = { version = "8", features = ["interpolate-folder-path", "compression"] }
 mime_guess = "2"
 
+# 指标导出（/metrics）
+prometheus = { version = "0.13", default-features = false }
+
 [dev-dependencies]
 wiremock = "0.6"
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -40,6 +40,7 @@ fn dummy_entry() -> KeyCacheEntry {
         quota: -1.0,
         allow_fast: true,
         max_concurrency: -1,
+        rpm_limit: -1,
         channel_kind: ChannelKind::Anthropic,
         fetched_at: Instant::now(),
     }
