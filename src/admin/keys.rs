@@ -174,15 +174,21 @@ pub async fn create_handler(
         return Err(AppError::BadRequest("name and upstream_key are required".into()));
     }
 
-    let inferred = route_by_upstream_key(upstream);
-    let channel = match body.channel_kind {
-        Some(explicit) if explicit != inferred => {
+    // upstream_key 是 `prefix:token` 或 `sk-ant-...` 时能推出渠道；
+    // `*` / `""` / `1,2,3` 这类池占位则推不出，落到显式 channel_kind。
+    let channel = match (route_by_upstream_key(upstream), body.channel_kind) {
+        (Some(inferred), Some(explicit)) if explicit != inferred => {
             return Err(AppError::BadRequest(format!(
                 "channel_kind={explicit} conflicts with upstream_key prefix (inferred {inferred})"
             )));
         }
-        Some(explicit) => explicit,
-        None => inferred,
+        (Some(inferred), _) => inferred,
+        (None, Some(explicit)) => explicit,
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "channel_kind is required when upstream_key does not carry channel info".into(),
+            ));
+        }
     };
 
     let created = db::keys::create(
@@ -223,11 +229,12 @@ pub async fn patch_handler(
         .ok_or(AppError::NotFound)?;
 
     if let (Some(uk), Some(ch_explicit)) = (patch.upstream_key.as_deref(), patch.channel_kind) {
-        let inferred = route_by_upstream_key(uk);
-        if inferred != ch_explicit {
-            return Err(AppError::BadRequest(format!(
-                "channel_kind={ch_explicit} conflicts with upstream_key prefix (inferred {inferred})"
-            )));
+        if let Some(inferred) = route_by_upstream_key(uk) {
+            if inferred != ch_explicit {
+                return Err(AppError::BadRequest(format!(
+                    "channel_kind={ch_explicit} conflicts with upstream_key prefix (inferred {inferred})"
+                )));
+            }
         }
     }
 

@@ -72,15 +72,25 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for ChannelKind {
     }
 }
 
-/// 按上游 key 前缀推断渠道。仅在 `POST/PATCH /admin/keys` 入库时调用，
-/// 热路径直接读 DB 的 channel_kind 列，不再 prefix 解析。
-pub fn route_by_upstream_key(upstream_key: &str) -> ChannelKind {
+/// 按上游 key 前缀推断渠道。仅当字段确实携带渠道信息（带前缀的真 token）才返 Some；
+/// 池占位（`""` / `"*"` / 纯数字 id 列表）或无法识别的格式返 None，调用方落到显式
+/// channel_kind。
+pub fn route_by_upstream_key(upstream_key: &str) -> Option<ChannelKind> {
     let s = upstream_key.trim();
     if s.starts_with("anthropic:") || s.starts_with("sk-ant-") {
-        ChannelKind::Anthropic
-    } else {
-        ChannelKind::Copilot
+        return Some(ChannelKind::Anthropic);
     }
+    if let Some((prefix, token)) = s.split_once(':') {
+        if !token.is_empty()
+            && matches!(
+                prefix.to_ascii_lowercase().as_str(),
+                "individual" | "business" | "enterprise"
+            )
+        {
+            return Some(ChannelKind::Copilot);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -89,16 +99,45 @@ mod tests {
 
     #[test]
     fn route_anthropic_prefix() {
-        assert_eq!(route_by_upstream_key("anthropic:sk-ant-foo"), ChannelKind::Anthropic);
-        assert_eq!(route_by_upstream_key("sk-ant-bar"), ChannelKind::Anthropic);
+        assert_eq!(
+            route_by_upstream_key("anthropic:sk-ant-foo"),
+            Some(ChannelKind::Anthropic)
+        );
+        assert_eq!(
+            route_by_upstream_key("sk-ant-bar"),
+            Some(ChannelKind::Anthropic)
+        );
     }
 
     #[test]
-    fn route_copilot_default() {
-        assert_eq!(route_by_upstream_key("enterprise:ghp_xxx"), ChannelKind::Copilot);
-        assert_eq!(route_by_upstream_key("individual:ghu_yyy"), ChannelKind::Copilot);
-        assert_eq!(route_by_upstream_key("ghp_raw"), ChannelKind::Copilot);
-        assert_eq!(route_by_upstream_key("*"), ChannelKind::Copilot);
+    fn route_copilot_prefix() {
+        assert_eq!(
+            route_by_upstream_key("enterprise:ghp_xxx"),
+            Some(ChannelKind::Copilot)
+        );
+        assert_eq!(
+            route_by_upstream_key("individual:ghu_yyy"),
+            Some(ChannelKind::Copilot)
+        );
+        assert_eq!(
+            route_by_upstream_key("BUSINESS:gho_zzz"),
+            Some(ChannelKind::Copilot)
+        );
+    }
+
+    #[test]
+    fn route_pool_placeholder_returns_none() {
+        assert_eq!(route_by_upstream_key(""), None);
+        assert_eq!(route_by_upstream_key("  "), None);
+        assert_eq!(route_by_upstream_key("*"), None);
+        assert_eq!(route_by_upstream_key("1,2,3"), None);
+    }
+
+    #[test]
+    fn route_unknown_format_returns_none() {
+        assert_eq!(route_by_upstream_key("ghp_raw"), None);
+        assert_eq!(route_by_upstream_key("foo:bar"), None);
+        assert_eq!(route_by_upstream_key("enterprise:"), None);
     }
 
     #[test]

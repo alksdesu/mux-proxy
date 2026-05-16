@@ -54,15 +54,21 @@ pub async fn create_handler(
     if body.key.trim().is_empty() {
         return Err(AppError::BadRequest("key is required".into()));
     }
-    let inferred = route_by_upstream_key(&body.key);
-    let channel = match body.channel_kind {
-        Some(explicit) if explicit != inferred => {
+    // upstream_keys 表的 key 列必须是真上游 token（``prefix:token`` 或 ``sk-ant-...``），
+    // 没有"走池占位"语义；推不出渠道直接 400 而不是默认 copilot。
+    let channel = match (route_by_upstream_key(&body.key), body.channel_kind) {
+        (Some(inferred), Some(explicit)) if explicit != inferred => {
             return Err(AppError::BadRequest(format!(
                 "channel_kind={explicit} conflicts with key prefix (inferred {inferred})"
             )));
         }
-        Some(explicit) => explicit,
-        None => inferred,
+        (Some(inferred), _) => inferred,
+        (None, Some(explicit)) => explicit,
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "unknown upstream key format; expected prefix:token or sk-ant-...".into(),
+            ));
+        }
     };
 
     let created = db::upstream::create(
@@ -85,11 +91,12 @@ pub async fn patch_handler(
 ) -> AppResult<axum::response::Response> {
     let id = parse_id_required(params.get("id").map(String::as_str))?;
     if let (Some(k), Some(ch_explicit)) = (patch.key.as_deref(), patch.channel_kind) {
-        let inferred = route_by_upstream_key(k);
-        if inferred != ch_explicit {
-            return Err(AppError::BadRequest(format!(
-                "channel_kind={ch_explicit} conflicts with key prefix (inferred {inferred})"
-            )));
+        if let Some(inferred) = route_by_upstream_key(k) {
+            if inferred != ch_explicit {
+                return Err(AppError::BadRequest(format!(
+                    "channel_kind={ch_explicit} conflicts with key prefix (inferred {inferred})"
+                )));
+            }
         }
     }
     let updated = db::upstream::update(&state.db, id, patch, &state.upstream_notifier)
