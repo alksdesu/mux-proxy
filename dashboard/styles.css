@@ -641,7 +641,8 @@ html, body {
 }
 
 .form-group input,
-.form-group select {
+.form-group select,
+.form-group textarea {
   width: 100%;
   padding: 8px 12px;
   background: var(--card);
@@ -651,6 +652,19 @@ html, body {
   font-family: var(--font);
   font-size: 13px;
   outline: none;
+}
+
+.form-group textarea {
+  font-family: var(--mono);
+  resize: vertical;
+  min-height: 56px;
+}
+
+.form-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  line-height: 1.4;
 }
 
 .form-group input:focus,

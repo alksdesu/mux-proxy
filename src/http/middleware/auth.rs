@@ -54,6 +54,7 @@ pub async fn resolve_client_key(
                 allow_fast: k.allow_fast,
                 max_concurrency: k.max_concurrency,
                 rpm_limit: k.rpm_limit,
+                allowed_models: crate::auth::key_cache::parse_allowed_models(&k.allowed_models),
                 channel_kind: k.channel_kind,
                 fetched_at: Instant::now(),
             }))

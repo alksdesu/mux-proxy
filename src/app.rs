@@ -5,6 +5,7 @@
 use crate::auth::{KeyCache, KeyCacheEntry, SingleFlight};
 use crate::billing::{SnapshotVersion, SpendCache, UsageWriter};
 use crate::channels::anthropic::key_pool::KeyPool as AnthropicKeyPool;
+use crate::channels::anthropic::model_splice::RewriteRule;
 use crate::channels::anthropic::upstream_client::AnthropicUpstreamClient;
 use crate::channels::copilot::{Breaker as CopilotBreaker, SessionTokenCache, UpstreamPool as CopilotPool};
 use crate::concurrency::Limiter;
@@ -13,6 +14,7 @@ use crate::db::upstream::UpstreamChangeNotifier;
 use crate::error::{AppError, AppResult};
 use crate::rate_limit::RateLimiter;
 use crate::util::inflight::{InflightGuard, InflightTracker};
+use arc_swap::ArcSwap;
 use axum::extract::ConnectInfo;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -148,6 +150,9 @@ pub struct AppState {
     /// Anthropic 渠道运行时：官方 key 池 + 字节保真 hyper 上游客户端。
     pub anthropic_pool: Arc<AnthropicKeyPool>,
     pub anthropic_client: AnthropicUpstreamClient,
+    /// 字节级 model rewrite 规则。admin CRUD 后调 ``store`` 原子换新 Arc，
+    /// 请求处理无需重启，``load_full`` 拿到的 Arc 在请求生命周期内固定。
+    pub anthropic_rules: Arc<ArcSwap<Vec<RewriteRule>>>,
 }
 
 impl AppState {
@@ -189,6 +194,8 @@ impl AppState {
             cfg.anthropic_upstream_timeout,
         )?;
 
+        let anthropic_rules = load_anthropic_rules(&db, &cfg).await?;
+
         Ok(Self {
             cfg: Arc::new(cfg),
             db,
@@ -206,8 +213,44 @@ impl AppState {
             copilot_http,
             anthropic_pool,
             anthropic_client,
+            anthropic_rules,
         })
     }
+}
+
+/// 启动时：从 DB 拉 enabled rules；DB 空 + env 有 seed 值时写一次再重读。
+async fn load_anthropic_rules(
+    db: &crate::db::Db,
+    cfg: &Config,
+) -> AppResult<Arc<ArcSwap<Vec<RewriteRule>>>> {
+    let env_spec = cfg
+        .anthropic_rewrite_rules
+        .iter()
+        .map(|r| format!("{}={}", r.prefix, r.target))
+        .collect::<Vec<_>>()
+        .join(",");
+    let inserted = crate::db::anthropic_rules::seed_from_env_if_empty(db, &env_spec).await?;
+    if inserted > 0 {
+        info!(inserted, "seeded anthropic rewrite rules from env");
+    }
+    let rows = crate::db::anthropic_rules::list_enabled(db).await?;
+    let rules: Vec<RewriteRule> = rows
+        .into_iter()
+        .map(|r| RewriteRule::new(r.prefix, r.target))
+        .collect();
+    Ok(Arc::new(ArcSwap::from_pointee(rules)))
+}
+
+/// admin CRUD 后由 admin handler 调用：重新从 DB 读 + 原子换 Arc。
+pub async fn reload_anthropic_rules(state: &AppState) -> AppResult<()> {
+    let rows = crate::db::anthropic_rules::list_enabled(&state.db).await?;
+    let rules: Vec<RewriteRule> = rows
+        .into_iter()
+        .map(|r| RewriteRule::new(r.prefix, r.target))
+        .collect();
+    state.anthropic_rules.store(Arc::new(rules));
+    state.snapshot.bump();
+    Ok(())
 }
 
 fn init_tracing(level: &str) {

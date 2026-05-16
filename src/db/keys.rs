@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub async fn find_by_key(db: &Db, key: &str) -> AppResult<Option<ApiKey>> {
     let row = sqlx::query_as::<_, ApiKey>(
-        "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind \
+        "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind \
          FROM api_keys WHERE key = $1",
     )
     .bind(key)
@@ -20,7 +20,7 @@ pub async fn find_by_key(db: &Db, key: &str) -> AppResult<Option<ApiKey>> {
 
 pub async fn find_by_id(db: &Db, id: i64) -> AppResult<Option<ApiKey>> {
     let row = sqlx::query_as::<_, ApiKey>(
-        "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind \
+        "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind \
          FROM api_keys WHERE id = $1",
     )
     .bind(id)
@@ -37,7 +37,7 @@ pub async fn list(
 ) -> AppResult<Vec<ApiKey>> {
     let rows = match channel {
         Some(ch) => sqlx::query_as::<_, ApiKey>(
-            "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind \
+            "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind \
              FROM api_keys WHERE channel_kind = $1 ORDER BY id LIMIT $2 OFFSET $3",
         )
         .bind(ch.as_str())
@@ -46,7 +46,7 @@ pub async fn list(
         .fetch_all(db.pool())
         .await?,
         None => sqlx::query_as::<_, ApiKey>(
-            "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind \
+            "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind \
              FROM api_keys ORDER BY id LIMIT $1 OFFSET $2",
         )
         .bind(limit)
@@ -80,6 +80,7 @@ pub async fn create(
     allow_fast: bool,
     max_concurrency: i64,
     rpm_limit: i64,
+    allowed_models: &str,
     channel_kind: ChannelKind,
 ) -> AppResult<ApiKey> {
     let raw = Uuid::new_v4().simple().to_string();
@@ -88,9 +89,9 @@ pub async fn create(
     let allow_fast_int: i32 = if allow_fast { 1 } else { 0 };
 
     let row = sqlx::query_as::<_, ApiKey>(
-        "INSERT INTO api_keys (key, name, upstream_key, created_at, quota, allow_fast, max_concurrency, rpm_limit, channel_kind) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-         RETURNING id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind",
+        "INSERT INTO api_keys (key, name, upstream_key, created_at, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, channel_kind) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+         RETURNING id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind",
     )
     .bind(&key)
     .bind(name)
@@ -100,6 +101,7 @@ pub async fn create(
     .bind(allow_fast_int)
     .bind(max_concurrency)
     .bind(rpm_limit)
+    .bind(allowed_models)
     .bind(channel_kind.as_str())
     .fetch_one(db.pool())
     .await?;
@@ -110,7 +112,7 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
     let mut tx = db.pool().begin().await?;
 
     let existing: Option<ApiKey> = sqlx::query_as::<_, ApiKey>(
-        "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind \
+        "SELECT id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind \
          FROM api_keys WHERE id = $1",
     )
     .bind(id)
@@ -156,6 +158,9 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
     if patch.rpm_limit.is_some() {
         push_set!("rpm_limit");
     }
+    if patch.allowed_models.is_some() {
+        push_set!("allowed_models");
+    }
     if patch.channel_kind.is_some() {
         push_set!("channel_kind");
     }
@@ -167,7 +172,7 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
 
     let sql = format!(
         "UPDATE api_keys SET {} WHERE id = ${} \
-         RETURNING id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, created_at, channel_kind",
+         RETURNING id, key, name, upstream_key, quota, allow_fast, max_concurrency, rpm_limit, allowed_models, created_at, channel_kind",
         sets.join(", "),
         idx
     );
@@ -190,6 +195,9 @@ pub async fn update(db: &Db, id: i64, patch: ApiKeyPatch) -> AppResult<Option<Ap
     }
     if let Some(rpm) = patch.rpm_limit {
         q = q.bind(rpm);
+    }
+    if let Some(am) = patch.allowed_models.as_deref() {
+        q = q.bind(am.to_string());
     }
     if let Some(ch) = patch.channel_kind {
         q = q.bind(ch.as_str());

@@ -18,6 +18,8 @@ pub struct ApiKey {
     pub allow_fast: bool,
     pub max_concurrency: i64,
     pub rpm_limit: i64,
+    /// 逗号分隔的精确 model 白名单；空串 = 不限制。比对前两边 lowercase。
+    pub allowed_models: String,
     pub created_at: String,
     pub channel_kind: ChannelKind,
 }
@@ -34,6 +36,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ApiKey {
             allow_fast: allow_fast_int != 0,
             max_concurrency: row.try_get("max_concurrency")?,
             rpm_limit: row.try_get("rpm_limit").unwrap_or(-1),
+            allowed_models: row.try_get("allowed_models").unwrap_or_default(),
             created_at: row.try_get("created_at")?,
             channel_kind: row.try_get("channel_kind")?,
         })
@@ -48,6 +51,7 @@ pub struct ApiKeyPatch {
     pub allow_fast: Option<bool>,
     pub max_concurrency: Option<i64>,
     pub rpm_limit: Option<i64>,
+    pub allowed_models: Option<String>,
     pub channel_kind: Option<ChannelKind>,
 }
 

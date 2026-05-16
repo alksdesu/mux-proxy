@@ -403,6 +403,7 @@ function openEditKey(id) {
   document.getElementById('ek-quota').value = k.quota;
   document.getElementById('ek-concurrency').value = k.max_concurrency;
   document.getElementById('ek-rpm').value = k.rpm_limit ?? -1;
+  document.getElementById('ek-allowed-models').value = k.allowed_models ?? '';
   document.getElementById('ek-fast').value = k.allow_fast ? 'true' : 'false';
   applyChannelToModal(channel, {
     keyInputId: 'ek-upstream',
@@ -433,6 +434,7 @@ async function saveEditKey() {
     quota: parseFloat(document.getElementById('ek-quota').value),
     max_concurrency: parseInt(document.getElementById('ek-concurrency').value),
     rpm_limit: parseInt(document.getElementById('ek-rpm').value),
+    allowed_models: document.getElementById('ek-allowed-models').value.trim(),
     upstream_key: upstreamVal,
   };
   // Anthropic 渠道 allow_fast 无意义，不发以免覆盖。
@@ -465,6 +467,7 @@ function showCreateKeyModal() {
   document.getElementById('ck-quota').value = '-1';
   document.getElementById('ck-concurrency').value = '-1';
   document.getElementById('ck-rpm').value = '-1';
+  document.getElementById('ck-allowed-models').value = '';
   document.getElementById('ck-fast').value = 'true';
   syncCreateKeyChannel();
   openModal('modal-create-key');
@@ -483,6 +486,7 @@ async function createKey() {
     quota: parseFloat(document.getElementById('ck-quota').value),
     max_concurrency: parseInt(document.getElementById('ck-concurrency').value),
     rpm_limit: parseInt(document.getElementById('ck-rpm').value),
+    allowed_models: document.getElementById('ck-allowed-models').value.trim(),
     channel_kind: channel,
   };
   if (channel !== 'anthropic') {
@@ -1001,6 +1005,83 @@ function loadSystem() {
       : `<span style="color:var(--red)">已断开</span>`;
   });
   loadUpstreamKeys();
+  loadAnthropicRules();
+}
+
+// ===== ANTHROPIC REWRITE RULES =====
+async function loadAnthropicRules() {
+  try {
+    const rows = await api('GET', '/admin/anthropic/rewrite-rules');
+    renderAnthropicRules(rows);
+  } catch(e) { if (e.message !== 'auth') toast('加载映射规则失败', 'error'); }
+}
+
+function renderAnthropicRules(rows) {
+  const tbody = document.getElementById('anthropic-rules-tbody');
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">暂无映射规则。客户端发什么 model 上游就收到什么。</td></tr>';
+    return;
+  }
+  // 按 target 分组排序，让多对一关系视觉上更清晰
+  rows.sort((a, b) => (a.target === b.target ? a.id - b.id : a.target.localeCompare(b.target)));
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td class="mono">${r.id}</td>
+      <td class="mono">${esc(r.prefix)}</td>
+      <td class="mono">${esc(r.target)}</td>
+      <td>${r.enabled ? '<span class="badge badge-green">启用</span>' : '<span class="badge">禁用</span>'}</td>
+      <td style="font-size:11px;color:var(--text-secondary)">${fmtTime(r.created_at)}</td>
+      <td>
+        <button class="btn btn-sm" onclick='editRewriteRule(${JSON.stringify(r)})'>编辑</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteRewriteRule(${r.id}, ${JSON.stringify(r.prefix)})">删除</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function showAddRewriteRuleModal() {
+  document.getElementById('rewrite-rule-title').textContent = '添加 Anthropic 模型映射';
+  document.getElementById('rr-id').value = '';
+  document.getElementById('rr-prefix').value = '';
+  document.getElementById('rr-target').value = '';
+  document.getElementById('rr-enabled').value = 'true';
+  openModal('modal-rewrite-rule');
+}
+
+function editRewriteRule(rule) {
+  document.getElementById('rewrite-rule-title').textContent = `编辑映射 — ${rule.prefix}`;
+  document.getElementById('rr-id').value = rule.id;
+  document.getElementById('rr-prefix').value = rule.prefix;
+  document.getElementById('rr-target').value = rule.target;
+  document.getElementById('rr-enabled').value = rule.enabled ? 'true' : 'false';
+  openModal('modal-rewrite-rule');
+}
+
+async function saveRewriteRule() {
+  const id = document.getElementById('rr-id').value;
+  const prefix = document.getElementById('rr-prefix').value.trim();
+  const target = document.getElementById('rr-target').value.trim();
+  const enabled = document.getElementById('rr-enabled').value === 'true';
+  if (!prefix || !target) { toast('prefix 和 target 不能为空', 'error'); return; }
+  try {
+    if (id) {
+      await api('PATCH', `/admin/anthropic/rewrite-rules?id=${id}`, { prefix, target, enabled });
+    } else {
+      await api('POST', '/admin/anthropic/rewrite-rules', { prefix, target, enabled });
+    }
+    toast('已保存，实时生效', 'success');
+    closeModal('modal-rewrite-rule');
+    loadAnthropicRules();
+  } catch(e) { toast('保存失败: ' + e.message, 'error'); }
+}
+
+async function deleteRewriteRule(id, prefix) {
+  if (!confirm(`确定删除映射 ${prefix} ?`)) return;
+  try {
+    await api('DELETE', `/admin/anthropic/rewrite-rules?id=${id}`);
+    toast('已删除', 'success');
+    loadAnthropicRules();
+  } catch(e) { toast('删除失败: ' + e.message, 'error'); }
 }
 
 // ===== UPSTREAM KEYS =====

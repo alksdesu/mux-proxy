@@ -217,6 +217,25 @@
         </div>
       </div>
 
+      <!-- Anthropic 模型映射 -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;margin-top:8px">
+        <div>
+          <h3 style="font-size:14px;font-weight:500;display:inline-block;margin-right:8px">Anthropic 模型映射</h3>
+          <span style="font-size:12px;color:var(--text-secondary)">字节级 prefix → target，多 prefix 可指向同一 target</span>
+        </div>
+        <button class="btn btn-primary" onclick="showAddRewriteRuleModal()">添加规则</button>
+      </div>
+      <div class="data-table-wrap" style="margin-bottom:32px">
+        <div style="overflow-x:auto">
+        <table class="data-table">
+          <thead><tr>
+            <th>ID</th><th>客户端 model 前缀</th><th>替换为上游 model</th><th>启用</th><th>创建时间</th><th>操作</th>
+          </tr></thead>
+          <tbody id="anthropic-rules-tbody"></tbody>
+        </table>
+        </div>
+      </div>
+
       <div class="system-grid">
         <div class="system-card">
           <h3>重置统计</h3>
@@ -241,6 +260,33 @@
       </div>
     </div>
   </main>
+</div>
+
+<div class="modal-overlay" id="modal-rewrite-rule">
+  <div class="modal">
+    <h2 id="rewrite-rule-title">添加 Anthropic 模型映射</h2>
+    <input type="hidden" id="rr-id">
+    <div class="form-group">
+      <label>客户端发的 model 前缀</label>
+      <input type="text" id="rr-prefix" placeholder="claude-opus-4-7">
+      <div class="form-hint">starts_with 匹配。多个前缀指同一 target，分别添加即可。</div>
+    </div>
+    <div class="form-group">
+      <label>替换为上游真实 model 名</label>
+      <input type="text" id="rr-target" placeholder="claude-jupiter-v1-p">
+    </div>
+    <div class="form-group">
+      <label>启用</label>
+      <select id="rr-enabled">
+        <option value="true">是</option>
+        <option value="false">否</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modal-rewrite-rule')">取消</button>
+      <button class="btn btn-primary" onclick="saveRewriteRule()">保存</button>
+    </div>
+  </div>
 </div>
 
 <!-- MODALS -->
@@ -282,6 +328,11 @@
     <div class="form-group">
       <label>每分钟请求数上限 (-1 = 无限, 0 = 全禁)</label>
       <input type="number" id="ck-rpm" value="-1">
+    </div>
+    <div class="form-group">
+      <label>允许的模型（逗号分隔，留空 = 不限）</label>
+      <textarea id="ck-allowed-models" rows="2" placeholder="claude-opus-4-7, claude-sonnet-4-5"></textarea>
+      <div class="form-hint">精确匹配，大小写不敏感。请求里 model 字段不在列表内返 403。</div>
     </div>
     <div class="form-group" id="ck-fast-group">
       <label>允许 Fast</label>
@@ -352,6 +403,11 @@
     <div class="form-group">
       <label>每分钟请求数上限 (-1 = 无限, 0 = 全禁)</label>
       <input type="number" id="ek-rpm">
+    </div>
+    <div class="form-group">
+      <label>允许的模型（逗号分隔，留空 = 不限）</label>
+      <textarea id="ek-allowed-models" rows="2" placeholder="claude-opus-4-7, claude-sonnet-4-5"></textarea>
+      <div class="form-hint">精确匹配，大小写不敏感。</div>
     </div>
     <div class="form-group" id="ek-fast-group">
       <label>允许 Fast</label>

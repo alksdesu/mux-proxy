@@ -22,8 +22,30 @@ pub struct KeyCacheEntry {
     pub allow_fast: bool,
     pub max_concurrency: i64,
     pub rpm_limit: i64,
+    /// 已 lowercase + 去空 entry 的白名单。空 Vec = 不限制。
+    pub allowed_models: Vec<String>,
     pub channel_kind: ChannelKind,
     pub fetched_at: Instant,
+}
+
+impl KeyCacheEntry {
+    /// 命中白名单返 true；空白名单视为不限制。比对走 lowercase 精确匹配。
+    pub fn model_allowed(&self, model: &str) -> bool {
+        if self.allowed_models.is_empty() {
+            return true;
+        }
+        let needle = model.to_ascii_lowercase();
+        self.allowed_models.iter().any(|m| m == &needle)
+    }
+}
+
+/// 把逗号分隔的白名单字符串拆成 lowercase Vec，过滤空 entry。
+/// DB 写入侧不强制规范化（避免吞用户写入），运行时统一在这里规范化。
+pub fn parse_allowed_models(spec: &str) -> Vec<String> {
+    spec.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 impl KeyCacheEntry {
@@ -123,6 +145,7 @@ mod tests {
             quota: -1.0,
             allow_fast: true,
             max_concurrency: -1,
+            allowed_models: Vec::new(),
             channel_kind: ChannelKind::Copilot,
             fetched_at: Instant::now(),
         }
@@ -208,6 +231,30 @@ mod tests {
             .expect("some");
         assert_eq!(out.name, "loaded");
         assert!(cache.get_fresh("sk-x").is_some());
+    }
+
+    #[test]
+    fn parse_allowed_models_basic() {
+        assert_eq!(
+            parse_allowed_models("claude-opus-4-7, claude-sonnet-4-5,,"),
+            vec!["claude-opus-4-7".to_string(), "claude-sonnet-4-5".to_string()]
+        );
+        assert!(parse_allowed_models("   ").is_empty());
+    }
+
+    #[test]
+    fn model_allowed_empty_whitelist_permits_all() {
+        let e = entry("a");
+        assert!(e.model_allowed("anything"));
+    }
+
+    #[test]
+    fn model_allowed_exact_match_lowercase() {
+        let mut e = entry("a");
+        e.allowed_models = vec!["claude-opus-4-7".into()];
+        assert!(e.model_allowed("claude-opus-4-7"));
+        assert!(e.model_allowed("Claude-OPUS-4-7"));
+        assert!(!e.model_allowed("claude-opus-4-6"));
     }
 
     #[tokio::test]

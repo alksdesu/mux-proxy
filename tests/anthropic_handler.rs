@@ -41,6 +41,7 @@ fn dummy_entry() -> KeyCacheEntry {
         allow_fast: true,
         max_concurrency: -1,
         rpm_limit: -1,
+        allowed_models: Vec::new(),
         channel_kind: ChannelKind::Anthropic,
         fetched_at: Instant::now(),
     }

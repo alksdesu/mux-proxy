@@ -69,6 +69,24 @@ async fn dispatch(
     let headers = parts.headers;
     let client_ip = extract_client_ip(&headers);
 
+    // 每 key 模型白名单。空白名单 = 不限制；非空 + 请求里有 model 字段 + 不命中 → 403。
+    // 没 model 字段（GET / 非 JSON / 体内无 model）直接放行不拦。
+    if !entry.allowed_models.is_empty() {
+        let content_type = headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if let Some(requested) =
+            crate::channels::anthropic::model_splice::extract_client_model(&bytes, content_type)
+        {
+            if !entry.model_allowed(&requested) {
+                return Err(AppError::Forbidden(format!(
+                    "model '{requested}' is not allowed for this key"
+                )));
+            }
+        }
+    }
+
     let result = match channel {
         ChannelKind::Copilot => {
             dispatch_copilot(state, entry, guard, method, path, query, headers, bytes, client_ip)
@@ -146,11 +164,14 @@ async fn dispatch_anthropic(
     body: Bytes,
     client_ip: String,
 ) -> Result<AxumResponse<Body>, AppError> {
+    // load_full 拿到的 Arc 在本 dispatch 生命周期内固定，
+    // admin 改 rules 后下一个 dispatch 才看到新版本。
+    let rules_arc = state.anthropic_rules.load_full();
     let ctx = AnthropicCtx {
         client: state.anthropic_client.clone(),
         key_pool: state.anthropic_pool.clone(),
         usage_writer: state.usage_writer.clone(),
-        rewrite_rules: state.cfg.anthropic_rewrite_rules.clone(),
+        rewrite_rules: (*rules_arc).clone(),
         key_cache_entry: entry,
         client_ip: if client_ip.is_empty() { None } else { Some(client_ip) },
         concurrency_guard: guard,

@@ -59,6 +59,7 @@ dashmap = "6"
 parking_lot = "0.12"
 lru = "0.12"
 once_cell = "1"
+arc-swap = "1"
 
 # 错误
 thiserror = "1"

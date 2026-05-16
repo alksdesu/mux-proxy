@@ -2,6 +2,7 @@
 //! 所有列表/统计端点支持 `?channel=copilot|anthropic|all`，非法值返 400。
 //! 未认证统一返 404，避免暴露管理面存在。
 
+pub mod anthropic_rules;
 pub mod errors;
 pub mod export;
 pub mod geoip;

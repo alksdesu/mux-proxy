@@ -2,7 +2,9 @@
 //! `/admin/usage/export` 单独允许 ?token=，匹配旧 dashboard `a[download]` 行为。
 //! `/ws` 由 axum::extract::WebSocketUpgrade 自己处理升级，鉴权挪进 socket loop。
 
-use crate::admin::{errors, export, geoip, keys, pricing, stats, timeseries, upstream, usage, ws};
+use crate::admin::{
+    anthropic_rules, errors, export, geoip, keys, pricing, stats, timeseries, upstream, usage, ws,
+};
 use crate::app::AppState;
 use crate::http::middleware::admin_auth::{admin_auth_layer, admin_auth_with_query_token};
 use axum::Router;
@@ -43,6 +45,13 @@ pub fn build_admin_router(state: AppState) -> Router<AppState> {
         )
         .route("/admin/geoip", get(geoip::handler))
         .route("/admin/pricing", get(pricing::handler))
+        .route(
+            "/admin/anthropic/rewrite-rules",
+            get(anthropic_rules::list_handler)
+                .post(anthropic_rules::create_handler)
+                .patch(anthropic_rules::patch_handler)
+                .delete(anthropic_rules::delete_handler),
+        )
         .route("/admin/stats/timeseries", get(timeseries::handler))
         .route("/stats", get(stats::stats_handler))
         .route("/stats/reset", post(stats::reset_handler))
@@ -166,6 +175,8 @@ mod tests {
         )
         .expect("anthropic client builds with default base");
 
+        let anthropic_rules = Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
+
         let state = AppState {
             cfg: Arc::new(cfg),
             db,
@@ -183,6 +194,7 @@ mod tests {
             copilot_http,
             anthropic_pool,
             anthropic_client,
+            anthropic_rules,
         };
         super::build_admin_router(state.clone()).with_state(state)
     }

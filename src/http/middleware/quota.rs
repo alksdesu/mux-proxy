@@ -53,6 +53,7 @@ mod tests {
             quota,
             allow_fast: true,
             max_concurrency: -1,
+            allowed_models: Vec::new(),
             channel_kind: ChannelKind::Copilot,
             fetched_at: Instant::now(),
         }

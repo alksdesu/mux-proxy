@@ -27,6 +27,7 @@ pub struct KeyListItemMasked {
     pub current_concurrency: u32,
     pub rpm_limit: i64,
     pub rpm_current: u32,
+    pub allowed_models: String,
     pub used: String,
     pub created_at: String,
     pub channel_kind: ChannelKind,
@@ -45,6 +46,7 @@ pub struct KeyListItemFull {
     pub current_concurrency: u32,
     pub rpm_limit: i64,
     pub rpm_current: u32,
+    pub allowed_models: String,
     pub used: f64,
     pub used_display: String,
     pub created_at: String,
@@ -63,6 +65,8 @@ pub struct CreateBody {
     pub max_concurrency: i64,
     #[serde(default = "default_rpm_limit")]
     pub rpm_limit: i64,
+    #[serde(default)]
+    pub allowed_models: String,
     pub channel_kind: Option<ChannelKind>,
 }
 
@@ -116,6 +120,7 @@ fn render_full(state: &AppState, k: ApiKey) -> KeyListItemFull {
         current_concurrency: state.limiter.current(&k.name),
         rpm_limit: k.rpm_limit,
         rpm_current: state.rate_limiter.current(&k.name) as u32,
+        allowed_models: k.allowed_models,
         used,
         used_display: format!("${:.2}", used),
         created_at: k.created_at,
@@ -135,6 +140,7 @@ fn render_masked(state: &AppState, k: ApiKey) -> KeyListItemMasked {
         current_concurrency: state.limiter.current(&k.name),
         rpm_limit: k.rpm_limit,
         rpm_current: state.rate_limiter.current(&k.name) as u32,
+        allowed_models: k.allowed_models,
         used: format!("${:.2}", used),
         created_at: k.created_at,
         channel_kind: k.channel_kind,
@@ -187,6 +193,7 @@ pub async fn create_handler(
         body.allow_fast,
         body.max_concurrency,
         body.rpm_limit,
+        body.allowed_models.trim(),
         channel,
     )
     .await?;
