@@ -1153,6 +1153,23 @@ function renderBreakerCell(id, br) {
   return '<span style="color:var(--text-muted);font-size:11px">正常</span>';
 }
 
+/// 渲染 upstream key 行上的 per-key override 摘要（rewrite_rules / allowed_models）。
+/// 仅 Anthropic 渠道有数据时显示，避免 Copilot 行无关装饰。
+/// 输出位置：紧跟 key 名称后内联，hover 显示规则详情。
+function renderUpstreamOverrideTags(r) {
+  if (r.channel_kind !== 'anthropic') return '';
+  const tags = [];
+  if (Array.isArray(r.rewrite_rules) && r.rewrite_rules.length > 0) {
+    const detail = r.rewrite_rules.map(x => `${x.prefix}→${x.target}`).join('\n');
+    tags.push(`<span class="badge badge-blue" style="font-size:10px;margin-left:6px" title="${esc(detail)}">规则×${r.rewrite_rules.length}</span>`);
+  }
+  if (Array.isArray(r.allowed_models) && r.allowed_models.length > 0) {
+    const detail = r.allowed_models.join('\n');
+    tags.push(`<span class="badge badge-orange" style="font-size:10px;margin-left:4px" title="${esc(detail)}">model×${r.allowed_models.length}</span>`);
+  }
+  return tags.join('');
+}
+
 function renderUpstreamKeys(rows) {
   const tbody = document.getElementById('upstream-tbody');
   if (!rows.length) {
@@ -1162,9 +1179,10 @@ function renderUpstreamKeys(rows) {
   tbody.innerHTML = rows.map(r => {
     const masked = r.key.length > 20 ? r.key.slice(0, 15) + '...' + r.key.slice(-4) : r.key;
     const br = cachedBreaker.find(b => b.id === r.id);
+    const overrideTags = renderUpstreamOverrideTags(r);
     return `<tr>
       <td class="mono">${r.id}</td>
-      <td>${esc(r.name)}</td>
+      <td>${esc(r.name)}${overrideTags}</td>
       <td>${channelTag(r.channel_kind)}</td>
       <td>
         <span class="key-masked" onclick="toggleKeyReveal(this,'${esc(r.key)}')" title="点击显示/复制">${esc(masked)}</span>
@@ -1186,11 +1204,48 @@ function renderUpstreamKeys(rows) {
 }
 
 function syncUpstreamChannel() {
-  applyChannelToModal(document.getElementById('au-channel').value, {
+  const channel = document.getElementById('au-channel').value;
+  applyChannelToModal(channel, {
     keyInputId: 'au-key',
     keyLabelId: 'au-key-label',
     labelTemplate: '密钥（{placeholder}）',
   });
+  const showAnthropicOnly = channel === 'anthropic';
+  document.querySelectorAll('#modal-add-upstream .anthropic-only').forEach(el => {
+    el.style.display = showAnthropicOnly ? '' : 'none';
+  });
+}
+
+/// rewrite rules 文本框 → [{prefix,target}] JSON 数组。
+/// 每行 trim 后 split('=', 2)，空行跳过；解析失败抛字符串异常给 saveUpstream 兜底。
+function parseRewriteRulesInput(text) {
+  return (text || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(line => {
+      const idx = line.indexOf('=');
+      if (idx === -1) throw new Error(`格式错误："${line}" 缺少 =`);
+      const prefix = line.slice(0, idx).trim();
+      const target = line.slice(idx + 1).trim();
+      if (!prefix) throw new Error(`格式错误："${line}" prefix 不能为空`);
+      if (!target) throw new Error(`格式错误："${line}" target 不能为空`);
+      return { prefix, target };
+    });
+}
+
+/// 每行一个 model 名 → 字符串数组，空行跳过。
+function parseAllowedModelsInput(text) {
+  return (text || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+}
+
+/// 反向格式化：[{prefix,target}] → 多行字符串，用于 editUpstream 回填。
+function formatRewriteRulesForInput(rules) {
+  if (!Array.isArray(rules) || rules.length === 0) return '';
+  return rules.map(r => `${r.prefix}=${r.target}`).join('\n');
 }
 
 function showAddUpstreamModal() {
@@ -1198,6 +1253,8 @@ function showAddUpstreamModal() {
   document.getElementById('au-name').value = '';
   document.getElementById('au-key').value = '';
   document.getElementById('au-note').value = '';
+  document.getElementById('au-rewrite-rules').value = '';
+  document.getElementById('au-allowed-models').value = '';
   const defaultChannel = currentChannel === 'anthropic' ? 'anthropic' : 'copilot';
   document.getElementById('au-channel').value = defaultChannel;
   syncUpstreamChannel();
@@ -1213,6 +1270,8 @@ function editUpstream(id) {
   document.getElementById('au-key').value = r.key;
   document.getElementById('au-note').value = r.note || '';
   document.getElementById('au-channel').value = r.channel_kind || 'copilot';
+  document.getElementById('au-rewrite-rules').value = formatRewriteRulesForInput(r.rewrite_rules);
+  document.getElementById('au-allowed-models').value = (r.allowed_models || []).join('\n');
   syncUpstreamChannel();
   document.getElementById('upstream-modal-title').textContent = '编辑上游密钥';
   openModal('modal-add-upstream');
@@ -1225,12 +1284,29 @@ async function saveUpstream() {
   const note = document.getElementById('au-note').value.trim();
   const channel = document.getElementById('au-channel').value;
   if (!key) { toast('密钥不能为空', 'error'); return; }
+
+  let rewriteRules, allowedModels;
+  try {
+    rewriteRules = parseRewriteRulesInput(document.getElementById('au-rewrite-rules').value);
+    allowedModels = parseAllowedModelsInput(document.getElementById('au-allowed-models').value);
+  } catch (e) {
+    toast('解析失败：' + e.message, 'error');
+    return;
+  }
+
+  // 非 Anthropic 渠道不发这两个字段（后端会忽略但前端层先拦避免 noise）。
+  // PATCH/POST 共用 payload：rewrite_rules / allowed_models 用空数组表示"清回 NULL"。
+  const payload = { name, key, note, channel_kind: channel };
+  if (channel === 'anthropic') {
+    payload.rewrite_rules = rewriteRules;
+    payload.allowed_models = allowedModels;
+  }
+
   try {
     if (id) {
-      // 让用户改 key 时能同步改渠道，后端会校验 channel 与 key 前缀一致。
-      await api('PATCH', `/admin/upstream?id=${id}`, { name, key, note, channel_kind: channel });
+      await api('PATCH', `/admin/upstream?id=${id}`, payload);
     } else {
-      await api('POST', '/admin/upstream', { name, key, note, channel_kind: channel });
+      await api('POST', '/admin/upstream', payload);
     }
     toast(id ? '已更新' : '已添加', 'success');
     closeModal('modal-add-upstream');

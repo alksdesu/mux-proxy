@@ -1,7 +1,10 @@
 //! 官方 Anthropic key 池：纯随机选 + 401/403 直接熔断、429 滑动窗口累计。
 //! 熔断逻辑走 ``shared::breaker`` 泛型实现；本模块负责 keys 缓存 + DB 同步 +
 //! ``BreakerInfo`` 到带 ``ChannelKind`` 的 ``BreakerSnapshot`` 的 wrap。
+//! per-key 的 rewrite_rules / allowed_models 在 [`PooledKey`] 上随 key 一起加载，
+//! handler 选完 key 后直接读，无需二次查库。
 
+use crate::channels::anthropic::model_splice::RewriteRule;
 use crate::channels::anthropic::upstream_key;
 use crate::channels::{BreakerSnapshot, ChannelKind};
 use crate::db::Db;
@@ -28,6 +31,41 @@ pub struct PooledKey {
     pub name: String,
     /// 裸 token (``sk-ant-xxx``)。已经被 ``upstream_key::parse`` 校验过。
     pub token: String,
+    /// per-key 改写规则。None 表示落全局 anthropic_rewrite_rules 兜底；
+    /// Some(vec) 完整覆盖全局，即使 vec 是空也代表"该 key 显式禁用 rewrite"
+    /// （DB 层 PATCH 时空数组已被归一化成 NULL，所以这里 Some 永远非空）。
+    pub rewrite_rules: Option<Vec<RewriteRule>>,
+    /// per-key 允许的客户端 model 白名单。None 表示无限制；
+    /// Some(vec) 表示精确匹配（lowercase 比对）。
+    pub allowed_models: Option<Vec<String>>,
+}
+
+impl PooledKey {
+    /// 判断该 key 是否允许给 ``model`` 用。None 表示无限制；
+    /// Some(vec) 走 lowercase 精确比对（前后 trim）。``model=None`` 时
+    /// 视作"客户端没传 model 字段"——如果该 key 配了白名单则一律拒绝。
+    pub fn allows_model(&self, model: Option<&str>) -> bool {
+        let Some(allowed) = self.allowed_models.as_deref() else {
+            return true;
+        };
+        let Some(m) = model else {
+            return false;
+        };
+        let needle = m.trim().to_ascii_lowercase();
+        allowed
+            .iter()
+            .any(|a| a.trim().to_ascii_lowercase() == needle)
+    }
+}
+
+/// pick 一次的结果：``Picked`` 拿到 key；``PoolEmpty`` 池里没有可用 key（全空/全熔断）；
+/// ``NoKeyForModel`` 池非空但都不允许这个 model — 直接给客户端返 400 model_not_supported，
+/// 不再尝试发上游（防止红队特征错误冒出来）。
+#[derive(Debug, Clone)]
+pub enum PickOutcome {
+    Picked(PooledKey),
+    PoolEmpty,
+    NoKeyForModel,
 }
 
 struct PoolInner {
@@ -72,9 +110,15 @@ impl KeyPool {
         })
     }
 
-    /// 从池中拿一把可用 key。``exclude_ids`` 用于上轮命中 401 后避开同一把。
-    /// 返回 None 表示池空或全部熔断。``is_disabled`` 命中会顺手把超时熔断自动复位。
-    pub async fn pick(&self, exclude_ids: &[i64]) -> AppResult<Option<PooledKey>> {
+    /// 从池中拿一把可用 key，按 ``requested_model`` 过滤 allowed_models 白名单。
+    /// ``exclude_ids`` 用于上轮命中 401 后避开同一把。
+    /// 返回值见 [`PickOutcome`]：池空 / 池非空但都不允许该 model / 选中。
+    /// ``is_disabled`` 命中会顺手把超时熔断自动复位。
+    pub async fn pick(
+        &self,
+        exclude_ids: &[i64],
+        requested_model: Option<&str>,
+    ) -> AppResult<PickOutcome> {
         self.ensure_fresh().await?;
         let guard = self.inner.lock();
         let alive: Vec<&PooledKey> = guard
@@ -83,10 +127,21 @@ impl KeyPool {
             .filter(|k| !exclude_ids.contains(&k.id) && !self.breaker.is_disabled(k.id))
             .collect();
         if alive.is_empty() {
-            return Ok(None);
+            return Ok(PickOutcome::PoolEmpty);
+        }
+        let allowed: Vec<&PooledKey> = alive
+            .iter()
+            .copied()
+            .filter(|k| k.allows_model(requested_model))
+            .collect();
+        if allowed.is_empty() {
+            return Ok(PickOutcome::NoKeyForModel);
         }
         let mut rng = rand::thread_rng();
-        Ok(alive.choose(&mut rng).map(|k| (*k).clone()))
+        Ok(allowed
+            .choose(&mut rng)
+            .map(|k| PickOutcome::Picked((*k).clone()))
+            .expect("non-empty list has random element"))
     }
 
     /// 上游返回 401/403 → 立刻把该 key 熔断（避免重试又用同一把）。
@@ -136,6 +191,8 @@ impl KeyPool {
                     id: r.id,
                     name: r.name,
                     token: k.token,
+                    rewrite_rules: r.rewrite_rules,
+                    allowed_models: r.allowed_models,
                 }),
                 Err(e) => warn!(id = r.id, error = ?e, "skip invalid anthropic upstream key"),
             }
@@ -231,9 +288,25 @@ pub fn pool_empty_error() -> AppError {
     AppError::Upstream("no anthropic upstream key available".into())
 }
 
+/// 客户端请求的 model 不在任何 upstream key 的白名单内时使用。
+/// 信息与 Anthropic 官方 invalid_request_error 同构，避免暴露代理路由决策细节。
+pub fn model_not_supported_error() -> AppError {
+    AppError::BadRequest("model not supported".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_key(id: i64, allowed: Option<Vec<&str>>) -> PooledKey {
+        PooledKey {
+            id,
+            name: format!("key-{id}"),
+            token: format!("sk-ant-test-{id}"),
+            rewrite_rules: None,
+            allowed_models: allowed.map(|v| v.into_iter().map(String::from).collect()),
+        }
+    }
 
     #[test]
     fn classify_status_buckets() {
@@ -244,5 +317,31 @@ mod tests {
         assert_eq!(classify_status(429), KeyFeedback::RateLimited);
         assert_eq!(classify_status(500), KeyFeedback::Neutral);
         assert_eq!(classify_status(502), KeyFeedback::Neutral);
+    }
+
+    #[test]
+    fn allows_model_none_whitelist_accepts_everything() {
+        let k = make_key(1, None);
+        assert!(k.allows_model(Some("claude-opus-4-7")));
+        assert!(k.allows_model(Some("anything-at-all")));
+        // 没传 model 字段也允许（无白名单意味着无限制）。
+        assert!(k.allows_model(None));
+    }
+
+    #[test]
+    fn allows_model_whitelist_case_insensitive() {
+        let k = make_key(1, Some(vec!["claude-opus-4-7", "claude-opus-4-7-fast"]));
+        assert!(k.allows_model(Some("claude-opus-4-7")));
+        assert!(k.allows_model(Some("CLAUDE-OPUS-4-7")));
+        assert!(k.allows_model(Some("  claude-opus-4-7-fast  ")));
+    }
+
+    #[test]
+    fn allows_model_whitelist_rejects_unlisted() {
+        let k = make_key(1, Some(vec!["claude-opus-4-7"]));
+        assert!(!k.allows_model(Some("claude-sonnet-4-5")));
+        assert!(!k.allows_model(Some("claude-opus-4-7-x")));
+        // 配了白名单的 key 不接受 model=None 的请求（防止漏判）。
+        assert!(!k.allows_model(None));
     }
 }

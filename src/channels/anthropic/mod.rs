@@ -3,6 +3,7 @@
 //! wire header case 真正生效依赖共享 server 层启用 ``preserve_header_case(true)``。
 
 pub mod billing_hook;
+pub mod error_sanitize;
 pub mod gzip_passthrough;
 pub mod handler;
 pub mod header_case;

@@ -51,6 +51,23 @@ fn build_ctx(
     base_url: &str,
     rewrite_rules: Vec<RewriteRule>,
 ) -> (HandlerContext, Arc<Limiter>) {
+    let default_key = PooledKey {
+        id: 1,
+        name: "mock-up".into(),
+        token: "sk-ant-test".into(),
+        rewrite_rules: None,
+        allowed_models: None,
+    };
+    build_ctx_with_pool(base_url, rewrite_rules, vec![default_key])
+}
+
+/// 构造 HandlerContext 但允许自定义 PooledKey 列表，覆盖 per-key rules / allowed_models。
+/// 全局 rewrite_rules 仍走原参数，per-key 与全局共存以测试两者优先级。
+fn build_ctx_with_pool(
+    base_url: &str,
+    global_rules: Vec<RewriteRule>,
+    pool_keys: Vec<PooledKey>,
+) -> (HandlerContext, Arc<Limiter>) {
     let snapshot = Arc::new(SnapshotVersion::new());
     let spend = Arc::new(SpendCache::new());
     let limiter = Limiter::new(snapshot.clone());
@@ -58,15 +75,7 @@ fn build_ctx(
     let usage_writer = UsageWriter::new(db.clone(), spend, snapshot);
     let notifier = UpstreamChangeNotifier::new();
 
-    let key_pool = KeyPool::test_only_with_keys(
-        vec![PooledKey {
-            id: 1,
-            name: "mock-up".into(),
-            token: "sk-ant-test".into(),
-        }],
-        db,
-        notifier,
-    );
+    let key_pool = KeyPool::test_only_with_keys(pool_keys, db, notifier);
 
     let client = AnthropicUpstreamClient::new(base_url, Duration::from_secs(10))
         .expect("build upstream client");
@@ -78,7 +87,7 @@ fn build_ctx(
         client,
         key_pool,
         usage_writer,
-        rewrite_rules: Arc::new(rewrite_rules),
+        rewrite_rules: Arc::new(global_rules),
         key_cache_entry: dummy_entry(),
         client_ip: Some("127.0.0.1".into()),
         concurrency_guard: guard,
@@ -307,6 +316,173 @@ data: {\"type\":\"message_delta\",\"model\":\"claude-3-5-sonnet-20241022\",\"usa
     // event 行结构保留
     assert!(body_str.contains("event: message_start"));
     assert!(body_str.contains("event: message_delta"));
+}
+
+#[tokio::test]
+async fn per_key_rewrite_rules_override_global_rules() {
+    // 全局规则把 A→GLOBAL_TARGET；per-key 规则把 A→PER_KEY_TARGET。
+    // 上游应当收到 PER_KEY_TARGET（per-key 优先于全局）。
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(wiremock::matchers::body_string_contains("\"model\":\"per-key-target\""))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                br#"{"id":"msg_x","model":"per-key-target","content":[]}"#.to_vec(),
+                "application/json",
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let per_key = PooledKey {
+        id: 7,
+        name: "red-team".into(),
+        token: "sk-ant-red".into(),
+        rewrite_rules: Some(vec![RewriteRule::new("client-model", "per-key-target")]),
+        allowed_models: None,
+    };
+    let global = vec![RewriteRule::new("client-model", "global-target")];
+    let (ctx, _limiter) = build_ctx_with_pool(&server.uri(), global, vec![per_key]);
+
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let req = ProxyRequest {
+        method: Method::POST,
+        path: "/v1/messages".into(),
+        raw_query: None,
+        headers: req_headers,
+        body: Bytes::from(r#"{"model":"client-model","messages":[]}"#),
+    };
+
+    let resp = handler::handle(ctx, req).await.expect("per-key rewrite ok");
+    let (status, _, body) = collect_body(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    // 响应里 model 已被 model_restore 还原回客户端原始名
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(s.contains("\"model\":\"client-model\""), "{s}");
+    assert!(!s.contains("per-key-target"), "{s}");
+    assert!(!s.contains("global-target"), "{s}");
+}
+
+#[tokio::test]
+async fn allowed_models_filter_rejects_with_generic_400() {
+    // 池里只有一个 key，allowed_models=[claude-opus-4-7]；请求 model=claude-sonnet → 客户端拿 400 通用错误。
+    // 上游不该被联系（wiremock 不挂任何 mount，命中即 panic）。
+    let server = MockServer::start().await;
+
+    let only_key = PooledKey {
+        id: 9,
+        name: "narrow".into(),
+        token: "sk-ant-narrow".into(),
+        rewrite_rules: None,
+        allowed_models: Some(vec!["claude-opus-4-7".into()]),
+    };
+    let (ctx, _limiter) = build_ctx_with_pool(&server.uri(), vec![], vec![only_key]);
+
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let req = ProxyRequest {
+        method: Method::POST,
+        path: "/v1/messages".into(),
+        raw_query: None,
+        headers: req_headers,
+        body: Bytes::from(r#"{"model":"claude-sonnet","messages":[]}"#),
+    };
+
+    let resp = handler::handle(ctx, req).await.expect("model-filter 400 ok");
+    let (status, _, body) = collect_body(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["type"], "error");
+    assert_eq!(parsed["error"]["type"], "invalid_request_error");
+    assert_eq!(parsed["error"]["message"], "model not supported");
+}
+
+#[tokio::test]
+async fn allowed_models_filter_passes_through_when_model_listed() {
+    // 同一个 key 的白名单包含请求的 model → 正常发到上游。
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                br#"{"id":"msg_y","model":"claude-opus-4-7","content":[]}"#.to_vec(),
+                "application/json",
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let only_key = PooledKey {
+        id: 11,
+        name: "narrow".into(),
+        token: "sk-ant-narrow".into(),
+        rewrite_rules: None,
+        allowed_models: Some(vec!["claude-opus-4-7".into()]),
+    };
+    let (ctx, _limiter) = build_ctx_with_pool(&server.uri(), vec![], vec![only_key]);
+
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let req = ProxyRequest {
+        method: Method::POST,
+        path: "/v1/messages".into(),
+        raw_query: None,
+        headers: req_headers,
+        body: Bytes::from(r#"{"model":"claude-opus-4-7","messages":[]}"#),
+    };
+
+    let resp = handler::handle(ctx, req).await.expect("allowed model passes");
+    let (status, _, _) = collect_body(resp).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn upstream_leak_phrase_replaced_with_generic_400() {
+    // 红队 key 上游对未授权 model 返回特征错误；代理必须替换为通用 400 不暴露关键词。
+    let server = MockServer::start().await;
+
+    let leak_body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"Please use your specified alias for red teaming via Anthropic's bug bounty program."}}"#;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_raw(leak_body.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+
+    let (ctx, _limiter) = build_ctx(&server.uri(), vec![]);
+
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let req = ProxyRequest {
+        method: Method::POST,
+        path: "/v1/messages".into(),
+        raw_query: None,
+        headers: req_headers,
+        body: Bytes::from(r#"{"model":"some-model","messages":[]}"#),
+    };
+
+    let resp = handler::handle(ctx, req).await.expect("leak path ok");
+    let (status, _, body) = collect_body(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let s = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !s.to_ascii_lowercase().contains("red teaming"),
+        "leak keyword must not reach client: {s}"
+    );
+    assert!(
+        !s.to_ascii_lowercase().contains("bug bounty"),
+        "leak keyword must not reach client: {s}"
+    );
+    assert!(s.contains("model not supported"), "should serve generic 400: {s}");
 }
 
 #[tokio::test]

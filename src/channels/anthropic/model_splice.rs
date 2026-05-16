@@ -3,9 +3,11 @@
 
 use crate::shared::model_field::{extract_model_field, model_field_regex};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 /// 单条改写规则：prefix 串前缀匹配则替换为 target。``str::starts_with`` 大小写敏感。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serialize/Deserialize 用于 upstream_keys.rewrite_rules JSONB 列双向编解码。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RewriteRule {
     pub prefix: String,
     pub target: String,

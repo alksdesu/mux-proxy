@@ -4,6 +4,7 @@
 
 pub use crate::channels::ChannelKind;
 
+use crate::channels::anthropic::model_splice::RewriteRule;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::Row;
@@ -167,11 +168,25 @@ pub struct UpstreamKey {
     pub note: String,
     pub created_at: String,
     pub channel_kind: ChannelKind,
+    /// NULL → 落全局 anthropic_rewrite_rules；非 NULL → 完整覆盖全局规则集。
+    /// 仅 Anthropic 渠道生效，其它渠道字段被忽略。
+    pub rewrite_rules: Option<Vec<RewriteRule>>,
+    /// NULL → 该 key 接受所有 model；非 NULL 数组 → 精确白名单（比较前两侧 lowercase）。
+    pub allowed_models: Option<Vec<String>>,
 }
 
 impl<'r> sqlx::FromRow<'r, PgRow> for UpstreamKey {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let enabled_int: i32 = row.try_get("enabled")?;
+        // migration 008 之前的 fixture 行没有这两列；try_get 失败 → None，落兜底语义。
+        let rewrite_rules = row
+            .try_get::<Option<sqlx::types::Json<Vec<RewriteRule>>>, _>("rewrite_rules")
+            .unwrap_or(None)
+            .map(|j| j.0);
+        let allowed_models = row
+            .try_get::<Option<sqlx::types::Json<Vec<String>>>, _>("allowed_models")
+            .unwrap_or(None)
+            .map(|j| j.0);
         Ok(UpstreamKey {
             id: row.try_get("id")?,
             key: row.try_get("key")?,
@@ -180,6 +195,8 @@ impl<'r> sqlx::FromRow<'r, PgRow> for UpstreamKey {
             note: row.try_get::<Option<String>, _>("note")?.unwrap_or_default(),
             created_at: row.try_get("created_at")?,
             channel_kind: row.try_get("channel_kind")?,
+            rewrite_rules,
+            allowed_models,
         })
     }
 }
@@ -191,4 +208,8 @@ pub struct UpstreamKeyPatch {
     pub enabled: Option<bool>,
     pub note: Option<String>,
     pub channel_kind: Option<ChannelKind>,
+    /// 空数组 → 清回 NULL（落全局兜底）；非空数组 → 完整覆盖；缺失 → 不改。
+    pub rewrite_rules: Option<Vec<RewriteRule>>,
+    /// 空数组 → 清回 NULL（无 model 限制）；非空 → 精确白名单；缺失 → 不改。
+    pub allowed_models: Option<Vec<String>>,
 }

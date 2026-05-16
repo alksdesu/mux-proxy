@@ -7,9 +7,12 @@ use crate::auth::KeyCacheEntry;
 use crate::billing::{ErrorLogRecord, UsageWriter};
 use crate::channels::anthropic::billing_hook::record_non_sse_usage;
 use crate::channels::ChannelKind;
+use crate::channels::anthropic::error_sanitize::{contains_leak, model_not_supported_body};
 use crate::channels::anthropic::gzip_passthrough::{decompress_gzip, rewrite_gzip};
 use crate::channels::anthropic::header_case::canonicalize;
-use crate::channels::anthropic::key_pool::{KeyPool, classify_status, pool_empty_error};
+use crate::channels::anthropic::key_pool::{
+    KeyPool, PickOutcome, classify_status, pool_empty_error,
+};
 use crate::channels::anthropic::model_restore::rewrite_json_response;
 use crate::channels::anthropic::model_splice::{RewriteRule, extract_client_model, rewrite_body};
 use crate::channels::anthropic::request_strip::is_response_hop_by_hop;
@@ -69,7 +72,23 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
     let client_model = extract_client_model(&req.body, &content_type);
     // 在 rewrite 改字节前保存客户端原始 body 用于计费/审计日志，超 256KB 截断避免内存膨胀。
     let request_body_for_log = body_for_log(&req.body);
-    let outcome = rewrite_body(req.body, &content_type, &ctx.rewrite_rules);
+
+    // 先选 key（按 client_model 过滤 allowed_models 白名单），再用选中 key 的 rules 改写 body。
+    // 顺序原因：rewrite_rules 是 per-key 的，不可能在没有选中 key 之前知道用哪套规则。
+    let pooled = match ctx.key_pool.pick(&[], client_model.as_deref()).await? {
+        PickOutcome::Picked(k) => k,
+        PickOutcome::NoKeyForModel => return Ok(model_not_supported_response()),
+        PickOutcome::PoolEmpty => return Err(pool_empty_error()),
+    };
+
+    // per-key rules 优先；None 落全局 ctx.rewrite_rules（ArcSwap 当前快照）。
+    let global_rules: &[RewriteRule] = ctx.rewrite_rules.as_slice();
+    let active_rules: &[RewriteRule] = pooled
+        .rewrite_rules
+        .as_deref()
+        .unwrap_or(global_rules);
+
+    let outcome = rewrite_body(req.body, &content_type, active_rules);
     let rewritten_marker = outcome.rewritten();
     let original_model = outcome.original_model.clone();
     let new_model = outcome.new_model.clone();
@@ -79,11 +98,6 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         .clone()
         .or_else(|| client_model.clone())
         .unwrap_or_else(|| "unknown".to_string());
-
-    let pooled = match ctx.key_pool.pick(&[]).await? {
-        Some(k) => k,
-        None => return Err(pool_empty_error()),
-    };
 
     let upstream_resp = ctx
         .client
@@ -182,13 +196,28 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
     // gzip 路径明文需要解压一次给计费 parse；下面 rewrite_gzip 还会独立再解一次自己做改写。
     // 解开放在不同模块各自维护失败兜底逻辑（rewrite_gzip 内部畸形 gzip 返原 raw，
     // 这里 decompress_gzip 失败时 caller 直接走 fallback），双重解压代价 < 100KB 响应 < 1ms。
+    // leak 扫描与计费共用同一 plain 拷贝，避免对同一字节流二次解压。
+    let plain_for_inspect = if is_gzip {
+        decompress_gzip(&buffered)
+    } else if is_json {
+        Some(buffered.clone())
+    } else {
+        None
+    };
+    // 红队 key 上游对未授权 model 会返回带 "red teaming" / "bug bounty" 关键词的错误体，
+    // 必须扫描后整段替换避免暴露 key 用途。仅 JSON 错误响应路径触发；2xx / 非 JSON 不扫。
+    let leak_detected = !status.is_success()
+        && plain_for_inspect
+            .as_deref()
+            .map(contains_leak)
+            .unwrap_or(false);
+
     match classify_billing_action(is_json, status, rewritten_marker) {
         BillingAction::RecordUsage => {
-            let plain = if is_gzip { decompress_gzip(&buffered) } else { Some(buffered.clone()) };
-            if let Some(plain) = plain {
+            if let Some(plain) = plain_for_inspect.as_ref() {
                 record_non_sse_usage(
                     &ctx.usage_writer,
-                    &plain,
+                    plain,
                     &ctx.key_cache_entry.name,
                     &billing_model,
                     request_body_for_log.clone(),
@@ -197,8 +226,9 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
             }
         }
         BillingAction::RecordError => {
-            let plain = if is_gzip { decompress_gzip(&buffered) } else { Some(buffered.clone()) };
-            let response_body = plain
+            // DB 落"上游真原话"（含 leak 关键词），admin 排查时能看到真因；
+            // 客户端拿到的是清洗后的通用 400（下面 leak_detected 分支处理）。
+            let response_body = plain_for_inspect
                 .as_deref()
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .unwrap_or_default();
@@ -218,6 +248,16 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
 
     drop(ctx.concurrency_guard);
 
+    if leak_detected {
+        warn!(
+            key = %ctx.key_cache_entry.name,
+            upstream_key_id = pooled.id,
+            status = status.as_u16(),
+            "anthropic upstream leaked red-team key signature; serving generic 400 to client",
+        );
+        return Ok(model_not_supported_response());
+    }
+
     // 错误状态码（非 2xx）一律字节透传：不解 gzip、不动 JSON model 字段。
     // 既保 byte-for-byte 透传承诺，也避免错误响应被解-重压坏掉 gzip header 字节指纹。
     let final_body = match (rewritten_marker, new_model, original_model, status.is_success()) {
@@ -236,6 +276,18 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
         resp_extensions,
         final_body,
     ))
+}
+
+/// 拒绝该 model 请求的标准响应：400 + 通用 Anthropic invalid_request_error 形态。
+/// 两个触发场景对外完全等同，客户端看不出是预过滤还是上游 alias 错误：
+///   1. NoKeyForModel — 池里所有 key 的 allowed_models 都不含该 model；
+///   2. leak_detected — 上游已返回特征错误，被代理替换。
+fn model_not_supported_response() -> ProxyResponse {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(full_body(model_not_supported_body()))
+        .expect("model_not_supported response build")
 }
 
 fn lower_header_str(headers: &HeaderMap, name: http::HeaderName) -> String {

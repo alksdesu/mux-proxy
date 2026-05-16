@@ -4,6 +4,7 @@
 
 use crate::admin::query::{parse_channel, parse_id_required};
 use crate::app::AppState;
+use crate::channels::anthropic::model_splice::RewriteRule;
 use crate::channels::{BreakerSnapshot, ChannelKind, route_by_upstream_key};
 use crate::db;
 use crate::db::schema::UpstreamKeyPatch;
@@ -36,6 +37,49 @@ pub struct CreateBody {
     #[serde(default)]
     pub note: String,
     pub channel_kind: Option<ChannelKind>,
+    /// 非 None 即按数组写入；空数组语义与 PATCH 一致（清回 NULL = 落全局兜底）。
+    /// 仅对 Anthropic 渠道生效；Copilot 渠道传了也存，但不参与运行时逻辑。
+    pub rewrite_rules: Option<Vec<RewriteRule>>,
+    /// 非 None 即按数组写入；空数组 → NULL（不限 model）。
+    pub allowed_models: Option<Vec<String>>,
+}
+
+/// 把 Option<Vec<T>> 规约为"语义化的写入值"：空数组等同于 None（清回 NULL/兜底）。
+/// PATCH/POST 共用同一规约逻辑保证语义一致。
+fn normalize_empty<T>(v: Option<Vec<T>>) -> Option<Vec<T>> {
+    match v {
+        Some(arr) if arr.is_empty() => None,
+        other => other,
+    }
+}
+
+/// 校验：rewrite_rules 不能有空 prefix / 空 target；allowed_models 不能含空字符串。
+/// 都是用户面校验，DB 层不重复做。
+fn validate_rewrite_rules(rules: &[RewriteRule]) -> AppResult<()> {
+    for r in rules {
+        if r.prefix.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "rewrite_rules entry has empty prefix".into(),
+            ));
+        }
+        if r.target.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "rewrite_rules entry has empty target".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_allowed_models(models: &[String]) -> AppResult<()> {
+    for m in models {
+        if m.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "allowed_models entry must not be empty".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub async fn list_handler(
@@ -71,12 +115,23 @@ pub async fn create_handler(
         }
     };
 
+    let rewrite_rules = normalize_empty(body.rewrite_rules);
+    if let Some(rules) = &rewrite_rules {
+        validate_rewrite_rules(rules)?;
+    }
+    let allowed_models = normalize_empty(body.allowed_models);
+    if let Some(models) = &allowed_models {
+        validate_allowed_models(models)?;
+    }
+
     let created = db::upstream::create(
         &state.db,
         body.key.trim(),
         body.name.trim(),
         body.note.trim(),
         channel,
+        rewrite_rules.as_deref(),
+        allowed_models.as_deref(),
         &state.upstream_notifier,
     )
     .await?;
@@ -97,6 +152,16 @@ pub async fn patch_handler(
                     "channel_kind={ch_explicit} conflicts with key prefix (inferred {inferred})"
                 )));
             }
+        }
+    }
+    if let Some(rules) = patch.rewrite_rules.as_deref() {
+        if !rules.is_empty() {
+            validate_rewrite_rules(rules)?;
+        }
+    }
+    if let Some(models) = patch.allowed_models.as_deref() {
+        if !models.is_empty() {
+            validate_allowed_models(models)?;
         }
     }
     let updated = db::upstream::update(&state.db, id, patch, &state.upstream_notifier)
