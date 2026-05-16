@@ -373,12 +373,12 @@
     </div>
     <div class="form-group anthropic-only" id="au-rewrite-group">
       <label>改写规则（仅 Anthropic）</label>
-      <textarea id="au-rewrite-rules" rows="4" placeholder="每行 prefix=target&#10;例如：claude-opus-4-7=jupiter"></textarea>
+      <textarea id="au-rewrite-rules" rows="4" placeholder="claude-opus-4-7=jupiter"></textarea>
       <div class="form-hint">每行一条 prefix=target；留空 = 回落全局 anthropic_rewrite_rules</div>
     </div>
     <div class="form-group anthropic-only" id="au-allowed-group">
       <label>允许的 model（仅 Anthropic）</label>
-      <textarea id="au-allowed-models" rows="3" placeholder="每行一个 model&#10;例如：claude-opus-4-7"></textarea>
+      <textarea id="au-allowed-models" rows="3" placeholder="claude-opus-4-7"></textarea>
       <div class="form-hint">每行一个 model；留空 = 不限制；客户端请求不在列表内 → 400 model_not_supported</div>
     </div>
     <div class="modal-actions">

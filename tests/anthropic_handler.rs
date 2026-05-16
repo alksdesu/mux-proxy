@@ -402,6 +402,44 @@ async fn allowed_models_filter_rejects_with_generic_400() {
 }
 
 #[tokio::test]
+async fn no_body_model_bypasses_whitelist_so_get_v1_models_still_works() {
+    // GET /v1/models 等无 body 路径不带 model 字段；如果池里所有 key 都配了 allowed_models，
+    // 之前会被预拦截成 400 model_not_supported。修复后这类无 model 请求跳过白名单，落到上游。
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":[{"id":"claude-opus-4-7"}]}"#.to_vec(),
+                "application/json",
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let only_key = PooledKey {
+        id: 13,
+        name: "narrow".into(),
+        token: "sk-ant-narrow".into(),
+        rewrite_rules: None,
+        allowed_models: Some(vec!["claude-opus-4-7".into()]),
+    };
+    let (ctx, _limiter) = build_ctx_with_pool(&server.uri(), vec![], vec![only_key]);
+
+    let req = ProxyRequest {
+        method: Method::GET,
+        path: "/v1/models".into(),
+        raw_query: None,
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+
+    let resp = handler::handle(ctx, req).await.expect("GET /v1/models passes whitelist");
+    let (status, _, _) = collect_body(resp).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn allowed_models_filter_passes_through_when_model_listed() {
     // 同一个 key 的白名单包含请求的 model → 正常发到上游。
     let server = MockServer::start().await;

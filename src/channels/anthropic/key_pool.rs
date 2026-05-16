@@ -41,15 +41,18 @@ pub struct PooledKey {
 }
 
 impl PooledKey {
-    /// 判断该 key 是否允许给 ``model`` 用。None 表示无限制；
-    /// Some(vec) 走 lowercase 精确比对（前后 trim）。``model=None`` 时
-    /// 视作"客户端没传 model 字段"——如果该 key 配了白名单则一律拒绝。
+    /// 判断该 key 是否允许给 ``model`` 用。
+    /// - 该 key 没配 allowed_models（None）：永远放行。
+    /// - 客户端没传 model 字段（``model=None``，发生在 GET /v1/models / count_tokens 等
+    ///   无 body 路径）：跳过白名单过滤，让请求落到上游裁定，**避免代理把"无对话 model"
+    ///   的合法路径预拦截成 model_not_supported**。
+    /// - 客户端传了 model：走 lowercase 精确比对（前后 trim）。
     pub fn allows_model(&self, model: Option<&str>) -> bool {
         let Some(allowed) = self.allowed_models.as_deref() else {
             return true;
         };
         let Some(m) = model else {
-            return false;
+            return true;
         };
         let needle = m.trim().to_ascii_lowercase();
         allowed
@@ -341,7 +344,13 @@ mod tests {
         let k = make_key(1, Some(vec!["claude-opus-4-7"]));
         assert!(!k.allows_model(Some("claude-sonnet-4-5")));
         assert!(!k.allows_model(Some("claude-opus-4-7-x")));
-        // 配了白名单的 key 不接受 model=None 的请求（防止漏判）。
-        assert!(!k.allows_model(None));
+    }
+
+    #[test]
+    fn allows_model_none_bypasses_whitelist_for_non_chat_paths() {
+        // GET /v1/models, count_tokens 等无 body / 无 model 字段的请求必须能透传到上游。
+        // 白名单只在客户端显式指定 model 时才参与判定。
+        let k = make_key(1, Some(vec!["claude-opus-4-7"]));
+        assert!(k.allows_model(None));
     }
 }

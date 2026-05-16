@@ -211,6 +211,11 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
             .as_deref()
             .map(contains_leak)
             .unwrap_or(false);
+    // 安全兜底：4xx + gzip 上游响应解压失败 → 我们没法扫 leak，原始 gzip 字节如果含
+    // "red teaming" 字符串就会泄漏。anthropic 错误响应实测都是干净的，但为防异常上游配置
+    // / 中间人篡改，gzip 解压失败的错误响应一律视作"可能含 leak"，走 generic 400 兜底。
+    let gzip_inspect_failed_on_error =
+        is_gzip && !status.is_success() && plain_for_inspect.is_none();
 
     match classify_billing_action(is_json, status, rewritten_marker) {
         BillingAction::RecordUsage => {
@@ -254,6 +259,15 @@ pub async fn handle(ctx: HandlerContext, req: ProxyRequest) -> AppResult<ProxyRe
             upstream_key_id = pooled.id,
             status = status.as_u16(),
             "anthropic upstream leaked red-team key signature; serving generic 400 to client",
+        );
+        return Ok(model_not_supported_response());
+    }
+    if gzip_inspect_failed_on_error {
+        warn!(
+            key = %ctx.key_cache_entry.name,
+            upstream_key_id = pooled.id,
+            status = status.as_u16(),
+            "anthropic upstream returned malformed gzip on error path; leak scan impossible, serving generic 400",
         );
         return Ok(model_not_supported_response());
     }

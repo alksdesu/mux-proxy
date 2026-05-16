@@ -178,15 +178,36 @@ pub struct UpstreamKey {
 impl<'r> sqlx::FromRow<'r, PgRow> for UpstreamKey {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let enabled_int: i32 = row.try_get("enabled")?;
-        // migration 008 之前的 fixture 行没有这两列；try_get 失败 → None，落兜底语义。
-        let rewrite_rules = row
+        let id_for_log: Option<i64> = row.try_get("id").ok();
+        // migration 008 之前的 fixture 行没有这两列；列缺失 → None 兼容旧 schema。
+        // JSONB 内容损坏（运维手动 SQL 写了非数组结构）也会落 None，但**必须 warn**
+        // 否则 admin 看 dashboard 显示该 key 没 per-key 配置，DB 里其实有脏数据，定时炸弹。
+        let rewrite_rules = match row
             .try_get::<Option<sqlx::types::Json<Vec<RewriteRule>>>, _>("rewrite_rules")
-            .unwrap_or(None)
-            .map(|j| j.0);
-        let allowed_models = row
+        {
+            Ok(opt) => opt.map(|j| j.0),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    key_id = ?id_for_log,
+                    "upstream_keys.rewrite_rules JSONB malformed; falling back to global rules",
+                );
+                None
+            }
+        };
+        let allowed_models = match row
             .try_get::<Option<sqlx::types::Json<Vec<String>>>, _>("allowed_models")
-            .unwrap_or(None)
-            .map(|j| j.0);
+        {
+            Ok(opt) => opt.map(|j| j.0),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    key_id = ?id_for_log,
+                    "upstream_keys.allowed_models JSONB malformed; falling back to no restriction",
+                );
+                None
+            }
+        };
         Ok(UpstreamKey {
             id: row.try_get("id")?,
             key: row.try_get("key")?,

@@ -53,7 +53,15 @@ fn normalize_empty<T>(v: Option<Vec<T>>) -> Option<Vec<T>> {
     }
 }
 
-/// 校验：rewrite_rules 不能有空 prefix / 空 target；allowed_models 不能含空字符串。
+/// 控制字符黑名单：行分隔符 / NUL / TAB / 等号 / 逗号 / 引号。
+/// dashboard 用换行 + 等号做 prefix=target 解析，DB 直注含这些字符的值会破坏 round-trip
+/// 显示（一条规则被拆成多行）或后续 admin 校验绕过。
+fn contains_forbidden_chars(s: &str) -> bool {
+    s.chars()
+        .any(|c| matches!(c, '\n' | '\r' | '\0' | '\t' | ',' | '"'))
+}
+
+/// 校验：rewrite_rules 不能有空 prefix / 空 target / 控制字符；allowed_models 同理。
 /// 都是用户面校验，DB 层不重复做。
 fn validate_rewrite_rules(rules: &[RewriteRule]) -> AppResult<()> {
     for r in rules {
@@ -67,6 +75,11 @@ fn validate_rewrite_rules(rules: &[RewriteRule]) -> AppResult<()> {
                 "rewrite_rules entry has empty target".into(),
             ));
         }
+        if contains_forbidden_chars(&r.prefix) || contains_forbidden_chars(&r.target) {
+            return Err(AppError::BadRequest(
+                "rewrite_rules entry contains forbidden control characters (newline/tab/comma/quote)".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -78,6 +91,26 @@ fn validate_allowed_models(models: &[String]) -> AppResult<()> {
                 "allowed_models entry must not be empty".into(),
             ));
         }
+        if contains_forbidden_chars(m) {
+            return Err(AppError::BadRequest(
+                "allowed_models entry contains forbidden control characters (newline/tab/comma/quote)".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 把"channel != anthropic 但 body 想写 per-key override 字段"翻成 400。
+/// 后端不静默接受无意义字段，避免 admin 误以为生效。
+fn reject_overrides_for_non_anthropic(
+    channel: ChannelKind,
+    has_rewrite: bool,
+    has_allowed: bool,
+) -> AppResult<()> {
+    if channel != ChannelKind::Anthropic && (has_rewrite || has_allowed) {
+        return Err(AppError::BadRequest(
+            "rewrite_rules and allowed_models are only valid for anthropic channel".into(),
+        ));
     }
     Ok(())
 }
@@ -116,10 +149,15 @@ pub async fn create_handler(
     };
 
     let rewrite_rules = normalize_empty(body.rewrite_rules);
+    let allowed_models = normalize_empty(body.allowed_models);
+    reject_overrides_for_non_anthropic(
+        channel,
+        rewrite_rules.is_some(),
+        allowed_models.is_some(),
+    )?;
     if let Some(rules) = &rewrite_rules {
         validate_rewrite_rules(rules)?;
     }
-    let allowed_models = normalize_empty(body.allowed_models);
     if let Some(models) = &allowed_models {
         validate_allowed_models(models)?;
     }
@@ -153,6 +191,24 @@ pub async fn patch_handler(
                 )));
             }
         }
+    }
+    // 渠道隔离：patch 想动 override 字段时，必须先确定 patch 生效后的 channel 是 anthropic。
+    // channel 可能从 patch 显式带来，否则要查 DB 当前行。
+    if patch.rewrite_rules.is_some() || patch.allowed_models.is_some() {
+        let effective_channel = match patch.channel_kind {
+            Some(ch) => ch,
+            None => {
+                db::upstream::find_by_id(&state.db, id)
+                    .await?
+                    .ok_or(AppError::NotFound)?
+                    .channel_kind
+            }
+        };
+        reject_overrides_for_non_anthropic(
+            effective_channel,
+            patch.rewrite_rules.is_some(),
+            patch.allowed_models.is_some(),
+        )?;
     }
     if let Some(rules) = patch.rewrite_rules.as_deref() {
         if !rules.is_empty() {
